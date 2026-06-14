@@ -1,0 +1,4 @@
+"Date","Transaction","Description","Quantity","Price","Amount (GBP)","Reference"
+"08/01/2025","Purchase","Vanguard FTSE All-World UCITS ETF","25","£49.50","1237.50","55201A1BCDE"
+"09/01/2025","Purchase","iShares Core FTSE 100 UCITS ETF","100","£8.15","815.00","55201A1BCDF"
+"15/01/2025","Sale","Vanguard FTSE All-World UCITS ETF","10","£50.10","501.00","55201S1GHIJ"

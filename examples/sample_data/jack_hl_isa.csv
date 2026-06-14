@@ -1,0 +1,9 @@
+Trade date,Settle date,Reference,Description,Unit cost (p),Quantity,Value (£)
+"06/01/2025","08/01/2025","B100001","Vanguard FTSE All-World UCITS ETF (VWRL)","4950.00","20.0000","990.00"
+"06/01/2025","08/01/2025","B100002","Vanguard S&P 500 UCITS ETF Acc (VUAG)","6620.00","15.0000","993.00"
+"08/01/2025","08/01/2025","Card Web","ISA Subscription","n/a","n/a","1000.00"
+"09/01/2025","09/01/2025","DIVIDEND","Vanguard FTSE All-World UCITS ETF (VWRL)","n/a","n/a","12.34"
+"10/01/2025","14/01/2025","S100004","Vanguard FTSE All-World UCITS ETF (VWRL)","5010.00","-10.0000","-501.00"
+"15/01/2025","15/01/2025","INTEREST","Interest on Cash","n/a","n/a","0.42"
+"20/01/2025","20/01/2025","LOYBONUS","Loyalty Bonus - Vanguard S&P 500 UCITS ETF Acc (VUAG)","n/a","n/a","0.81"
+"22/01/2025","22/01/2025","REG. SAVER","Transfer From Bank Account Bank A/C : ****7890","n/a","n/a","100.00"

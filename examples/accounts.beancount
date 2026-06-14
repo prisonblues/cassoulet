@@ -1,0 +1,58 @@
+option "operating_currency" "GBP"
+
+; === Banks ===
+
+2020-01-01 open Assets:Bank:HSBC:Checking         GBP
+  institution: "HSBC UK"
+  importer: "HSBCImporter"
+  owner: "personal"
+
+2020-01-01 open Assets:Bank:Starling:Personal      GBP
+  institution: "Starling Bank"
+  importer: "StarlingImporter"
+  owner: "personal"
+
+; === Brokers ===
+
+; HL uses a single CSV file for all transactions (buys, sells, dividends, cash)
+2020-01-01 open Assets:Broker:HL:ISA
+  institution: "Hargreaves Lansdown"
+  importer: "HLImporter"
+  type: "ISA"
+  owner: "personal"
+
+; AJ Bell uses two CSV files: one for security transactions, one for cash movements.
+; The multi-file importer matches them by reference number.
+2020-01-01 open Assets:Broker:AJBELL:SIPP
+  institution: "AJ Bell"
+  importer: "AJBellImporter"
+  type: "SIPP"
+  owner: "personal"
+
+; === Income ===
+
+2020-01-01 open Income:Salary                      GBP
+2020-01-01 open Income:Interest                    GBP
+2020-01-01 open Income:Dividends                   GBP
+
+; === Expenses ===
+
+2020-01-01 open Expenses:Groceries                 GBP
+2020-01-01 open Expenses:Transport                 GBP
+2020-01-01 open Expenses:Shopping                  GBP
+2020-01-01 open Expenses:Subscriptions             GBP
+2020-01-01 open Expenses:CouncilTax                GBP
+
+; === Equity ===
+
+2020-01-01 open Equity:Capital:External:HL:ISA     GBP
+2020-01-01 open Equity:Capital:External:AJBELL:SIPP GBP
+2020-01-01 open Equity:OpeningBalances             GBP
+
+; === Opening balances ===
+
+2024-12-31 pad Assets:Bank:HSBC:Checking Equity:OpeningBalances
+2025-01-01 balance Assets:Bank:HSBC:Checking 1650.00 GBP
+
+2024-12-31 pad Assets:Bank:Starling:Personal Equity:OpeningBalances
+2025-01-01 balance Assets:Bank:Starling:Personal 730.00 GBP

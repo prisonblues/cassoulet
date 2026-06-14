@@ -1,0 +1,22 @@
+; Currencies
+1900-01-01 commodity GBP
+1900-01-01 commodity USD
+
+; Equities
+2019-01-01 commodity VWRL
+  name: "Vanguard FTSE All-World UCITS ETF"
+  asset_class: "equity"
+  quote_currency: "GBP"
+  exchange: "LSE"
+
+2019-01-01 commodity VUAG
+  name: "Vanguard S&P 500 UCITS ETF Acc"
+  asset_class: "equity"
+  quote_currency: "GBP"
+  exchange: "LSE"
+
+2019-01-01 commodity ISF
+  name: "iShares Core FTSE 100 UCITS ETF"
+  asset_class: "equity"
+  quote_currency: "GBP"
+  exchange: "LSE"

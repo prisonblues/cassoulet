@@ -1,0 +1,8 @@
+"Date","Description","Reference","Settlement date","Receipt (GBP)","Payment (GBP)","Balance (GBP)"
+"06/04/2024","* BALANCE B/F *","-","-","0","0","0.00"
+"06/01/2025","BACS Credit - SIPP Contribution","-","06/01/2025","2500.00","0","2500.00"
+"08/01/2025","Purchase 25 Vanguard FTSE All-World UCITS ETF","55201A1BCDE","10/01/2025","0","1237.50","1262.50"
+"09/01/2025","Purchase 100 iShares Core FTSE 100 UCITS ETF","55201A1BCDF","13/01/2025","0","815.00","447.50"
+"15/01/2025","Sale 10 Vanguard FTSE All-World UCITS ETF","55201S1GHIJ","17/01/2025","501.00","0","948.50"
+"15/01/2025","Fund Cash Rebate JAN25","-","-","0.15","0","948.65"
+"20/01/2025","Dividend 25 Vanguard FTSE All-World UCITS ETF","55201D1KLMN","20/01/2025","6.25","0","954.90"

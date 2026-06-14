@@ -1,0 +1,8 @@
+; VUAG 2:1 stock split on 10 Jan 2025
+; Cassoulet automatically looks up all VUAG lots in the account,
+; doubles the quantity, and halves the cost per unit.
+2025-01-10 * "VUAG 2:1 stock split"
+  corporate-action: "stock-split"
+  split-commodity: "VUAG"
+  split-account: "Assets:Broker:HL:ISA"
+  split-ratio: "2:1"

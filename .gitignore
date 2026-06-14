@@ -1,0 +1,43 @@
+# Python
+*.pyc
+__pycache__/
+*.egg-info/
+dist/
+build/
+.venv/
+*.log
+
+# IDE
+.vscode/
+.idea/
+.cursor/
+.DS_Store
+
+# Data safety guards - block real financial data from being committed
+# Only examples/ and tests/ may contain CSV and beancount files
+*.csv
+!examples/**/*.csv
+!tests/**/*.csv
+
+*.beancount
+*.beancount.template
+!examples/**/*.beancount
+!examples/**/*.beancount.template
+!tests/**/*.beancount
+!tests/**/*.beancount.template
+
+*.ofx
+*.qfx
+*.qif
+
+# Block common data directories that should never exist here
+accounts/
+/entries/
+prices/
+tax/
+correspondence/
+config/filer.json
+notes/
+
+# Logs
+logs/

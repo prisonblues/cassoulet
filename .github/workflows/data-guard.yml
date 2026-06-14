@@ -1,0 +1,83 @@
+name: Data Guard
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  scan:
+    name: Scan for personal financial data
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check for UK sort codes
+        run: |
+          # Strip ISO dates (YYYY-MM-DD), UK dates (DD-MM-YYYY), and strftime patterns
+          # before checking for sort code patterns (NN-NN-NN)
+          FOUND=$(find . -type f \( -name '*.py' -o -name '*.md' -o -name '*.csv' \
+            -o -name '*.beancount' -o -name '*.txt' -o -name '*.json' -o -name '*.yml' \
+            -o -name '*.yaml' -o -name '*.toml' -o -name '*.cfg' -o -name '*.template' \) \
+            -not -path './.git/*' -not -path './.venv/*' \
+            -exec grep -lE '[0-9]{2}-[0-9]{2}-[0-9]{2}' {} \; | while read -r f; do
+              if sed -E 's/[0-9]{4}-[0-9]{2}-[0-9]{2}//g; s/[0-9]{2}-[0-9]{2}-[0-9]{4}//g; s/%[dDmMyYHMSIpBbAa]//g' "$f" \
+                | grep -qE '[0-9]{2}-[0-9]{2}-[0-9]{2}'; then
+                echo "$f"
+              fi
+            done)
+          if [[ -n "$FOUND" ]]; then
+            echo "::error::Possible UK sort codes found in: $FOUND"
+            exit 1
+          fi
+
+      - name: Check for account numbers
+        run: |
+          FOUND=$(find . -type f \( -name '*.py' -o -name '*.md' -o -name '*.csv' \
+            -o -name '*.beancount' -o -name '*.txt' -o -name '*.json' -o -name '*.yml' \
+            -o -name '*.yaml' -o -name '*.toml' -o -name '*.template' \) \
+            -not -path './.git/*' -not -path './.venv/*' \
+            -exec grep -lEi 'account.?(number|no)[^0-9]*[0-9]{8}' {} \;)
+          if [[ -n "$FOUND" ]]; then
+            echo "::error::Possible account numbers found in: $FOUND"
+            exit 1
+          fi
+
+      - name: Check for National Insurance numbers
+        run: |
+          FOUND=$(find . -type f \( -name '*.py' -o -name '*.md' -o -name '*.csv' \
+            -o -name '*.beancount' -o -name '*.txt' -o -name '*.json' -o -name '*.yml' \
+            -o -name '*.yaml' -o -name '*.toml' -o -name '*.template' \) \
+            -not -path './.git/*' -not -path './.venv/*' \
+            -exec grep -liE '[A-Z]{2}[0-9]{6}[A-D]' {} \;)
+          if [[ -n "$FOUND" ]]; then
+            echo "::error::Possible National Insurance numbers found in: $FOUND"
+            exit 1
+          fi
+
+      - name: Check for IBANs
+        run: |
+          FOUND=$(find . -type f \( -name '*.py' -o -name '*.md' -o -name '*.csv' \
+            -o -name '*.beancount' -o -name '*.txt' -o -name '*.json' -o -name '*.yml' \
+            -o -name '*.yaml' -o -name '*.toml' -o -name '*.template' \) \
+            -not -path './.git/*' -not -path './.venv/*' \
+            -exec grep -lE '[A-Z]{2}[0-9]{2}[A-Z0-9]{4}[0-9]{7}([A-Z0-9]?){0,16}' {} \;)
+          if [[ -n "$FOUND" ]]; then
+            echo "::error::Possible IBANs found in: $FOUND"
+            exit 1
+          fi
+
+      - name: Check for data files outside allowed directories
+        run: |
+          # CSV and beancount files should only exist in examples/ and tests/
+          BAD_CSV=$(find . -name '*.csv' -not -path './examples/*' -not -path './tests/*' \
+            -not -path './.git/*' -not -path './.venv/*' 2>/dev/null)
+          BAD_BC=$(find . -name '*.beancount' -not -path './examples/*' -not -path './tests/*' \
+            -not -path './.git/*' -not -path './.venv/*' 2>/dev/null)
+          if [[ -n "$BAD_CSV" || -n "$BAD_BC" ]]; then
+            echo "::error::Data files found outside examples/ and tests/:"
+            echo "$BAD_CSV"
+            echo "$BAD_BC"
+            exit 1
+          fi

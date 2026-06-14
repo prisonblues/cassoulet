@@ -1,0 +1,7 @@
+; ==============================================================================
+; CORE INCLUDES - Central Definition File
+; ==============================================================================
+; Paths are relative to entries/output/ (where this file gets copied to).
+
+include "../../commodities.beancount"
+include "../../accounts.beancount"
