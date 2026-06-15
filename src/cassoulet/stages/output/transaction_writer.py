@@ -750,7 +750,7 @@ class TransactionWriter(EnvelopeProcessor):
                 # Negative = gain (balances against higher sale proceeds)
                 postings.append(data.Posting(
                     account='Income:CapitalGains',
-                    units=Amount(capital_gain, 'GBP'),
+                    units=Amount(capital_gain, get_currency(envelope) or 'GBP'),
                     cost=None,
                     price=None,
                     flag=None,
