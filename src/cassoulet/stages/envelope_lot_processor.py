@@ -16,7 +16,8 @@ from cassoulet.base.exceptions import MissingCostBasisError, LotTrackingWarning
 from cassoulet.utils.envelope_utilities import (
     enhance_envelope,
     get_commodity,
-    get_commodity_units
+    get_commodity_units,
+    get_currency
 )
 from cassoulet.utils.deterministic_id import generate_id
 
@@ -191,6 +192,7 @@ class EnvelopeLotProcessor(EnvelopeProcessor):
                     'date': str(lot['date']),
                     'quantity': str(lot['quantity']),
                     'cost_per_unit': str(lot['cost_per_unit']),
+                    'currency': lot.get('currency', 'GBP'),
                     'envelope_id': lot.get('envelope_id', 'unknown')
                 })
 
@@ -258,6 +260,7 @@ class EnvelopeLotProcessor(EnvelopeProcessor):
             'date': envelope.date,
             'quantity': envelope.inbound_units,
             'cost_per_unit': cost_per_unit,
+            'currency': get_currency(envelope) or 'GBP',
             'envelope_id': envelope.envelope_id
         }
 
@@ -357,6 +360,7 @@ class EnvelopeLotProcessor(EnvelopeProcessor):
                 'lot_id': lot['lot_id'],
                 'quantity_consumed': take,
                 'cost_per_unit': lot['cost_per_unit'],
+                'currency': lot.get('currency', 'GBP'),
                 'acquisition_date': lot['date']  # Keep as date object
             })
 
@@ -502,6 +506,7 @@ class EnvelopeLotProcessor(EnvelopeProcessor):
                 'date': lot['date'],  # Preserve original acquisition date
                 'quantity': transfer_qty,
                 'cost_per_unit': lot['cost_per_unit'],  # Preserve cost basis
+                'currency': lot.get('currency', 'GBP'),
                 'envelope_id': envelope.envelope_id,
                 'transferred_from': lot['lot_id']
             }
@@ -517,6 +522,7 @@ class EnvelopeLotProcessor(EnvelopeProcessor):
                 'to_lot_id': new_lot['lot_id'],
                 'quantity': transfer_qty,
                 'cost_per_unit': lot['cost_per_unit'],
+                'currency': lot.get('currency', 'GBP'),
                 'acquisition_date': lot['date']  # Keep as date object
             })
 
@@ -617,6 +623,7 @@ class EnvelopeLotProcessor(EnvelopeProcessor):
                 'date': old_lot['date'],  # PRESERVE acquisition date
                 'quantity': old_lot['quantity'] * split.ratio,
                 'cost_per_unit': old_lot['cost_per_unit'] / split.ratio,
+                'currency': old_lot.get('currency', 'GBP'),
                 'envelope_id': f"split_{split.date}_{split.commodity}",
                 'split_from': old_lot['lot_id'],
                 'split_ratio': split.ratio
