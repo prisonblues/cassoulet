@@ -611,7 +611,7 @@ class TransactionWriter(EnvelopeProcessor):
                             # Create specific cost for this lot
                             cost = data.Cost(
                                 number=cost_per_unit,
-                                currency='GBP',  # TODO: Get from lot metadata
+                                currency=lot.get('currency') or get_currency(envelope) or 'GBP',
                                 date=acquisition_date,
                                 label=None
                             )
@@ -750,7 +750,7 @@ class TransactionWriter(EnvelopeProcessor):
                 # Negative = gain (balances against higher sale proceeds)
                 postings.append(data.Posting(
                     account='Income:CapitalGains',
-                    units=Amount(capital_gain, 'GBP'),
+                    units=Amount(capital_gain, get_currency(envelope) or 'GBP'),
                     cost=None,
                     price=None,
                     flag=None,
@@ -930,7 +930,7 @@ class TransactionWriter(EnvelopeProcessor):
             # Create the explicit cost for both sides
             cost = data.Cost(
                 number=cost_per_unit,
-                currency='GBP',  # TODO: Get from envelope or lot metadata
+                currency=lot.get('currency') or get_currency(envelope) or 'GBP',
                 date=acquisition_date,  # Use original acquisition date from lot metadata
                 label=None
             )
@@ -1432,7 +1432,7 @@ class TransactionWriter(EnvelopeProcessor):
                         cost=data.CostSpec(
                             number_per=old_lot['cost_per_unit'],
                             number_total=None,
-                            currency='GBP',  # TODO: Get from account metadata
+                            currency=old_lot.get('currency', 'GBP'),
                             date=old_lot['date'],
                             label=None,
                             merge=False
@@ -1449,7 +1449,7 @@ class TransactionWriter(EnvelopeProcessor):
                         cost=data.CostSpec(
                             number_per=new_lot['cost_per_unit'],
                             number_total=None,
-                            currency='GBP',  # TODO: Get from account metadata
+                            currency=new_lot.get('currency', 'GBP'),
                             date=new_lot['date'],  # Preserved acquisition date
                             label=None,
                             merge=False
