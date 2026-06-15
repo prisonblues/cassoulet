@@ -271,15 +271,17 @@ class EnvelopeLotProcessor(EnvelopeProcessor):
 
                 # Adjust outbound_units to include commission so the output
                 # transaction balances (cost basis total = cash outflow).
-                adjusted_outbound = (
-                    abs(envelope.outbound_units) + commission_amount
-                    if envelope.outbound_units
-                    else commission_amount
-                )
+                if envelope.outbound_units:
+                    adjusted_outbound = abs(envelope.outbound_units) + commission_amount
+                else:
+                    # cost_per_unit already includes commission; total_cost is
+                    # the full acquisition cost we need outbound_units to reflect.
+                    adjusted_outbound = total_cost
                 envelope = enhance_envelope(
                     envelope,
                     reason="Included separate commission in cost basis",
                     outbound_units=adjusted_outbound,
+                    unit_price=cost_per_unit,
                 )
 
                 logger.info(
@@ -392,7 +394,7 @@ class EnvelopeLotProcessor(EnvelopeProcessor):
         remaining = quantity_needed
 
         # Sort lots by date for FIFO
-        self.lots[key].sort(key=lambda l: l["date"])
+        self.lots[key].sort(key=lambda x: x["date"])
 
         for lot in self.lots[key]:
             if remaining <= 0:
@@ -436,7 +438,7 @@ class EnvelopeLotProcessor(EnvelopeProcessor):
             )
 
         # Remove exhausted lots
-        self.lots[key] = [l for l in self.lots[key] if l["quantity"] > 0]
+        self.lots[key] = [x for x in self.lots[key] if x["quantity"] > 0]
 
         # Check if we consumed enough
         if remaining > 0:
@@ -537,7 +539,7 @@ class EnvelopeLotProcessor(EnvelopeProcessor):
         remaining = abs(quantity)
 
         # Sort for FIFO
-        self.lots[from_key].sort(key=lambda l: l["date"])
+        self.lots[from_key].sort(key=lambda x: x["date"])
 
         for lot in self.lots[from_key][:]:  # Copy list since we'll modify
             if remaining <= 0:
@@ -610,7 +612,7 @@ class EnvelopeLotProcessor(EnvelopeProcessor):
             remaining -= transfer_qty
 
         # Remove exhausted lots from source
-        self.lots[from_key] = [l for l in self.lots[from_key] if l["quantity"] > 0]
+        self.lots[from_key] = [x for x in self.lots[from_key] if x["quantity"] > 0]
 
         # Enhance envelope with transfer info
         if transferred_lots:

@@ -121,3 +121,33 @@ def test_lot_registry_has_fee_inclusive_cost():
     lots = registry["lot_registry"]["Assets:Broker:Stocks:VWRL"]
     assert len(lots) == 1
     assert lots[0]["cost_per_unit"] == "101"
+
+
+def test_buy_with_unit_price_and_commission():
+    """When unit_price is set explicitly, commission should still be added."""
+    # CSV envelope with unit_price=100 and no outbound_units
+    envelope = create_envelope(
+        reason="test",
+        date=date(2024, 1, 15),
+        narration="Buy shares",
+        outbound_units=None,
+        outbound_type="GBP",
+        outbound_account="Assets:Broker:Cash",
+        inbound_units=Decimal("10"),
+        inbound_type="VWRL",
+        inbound_account="Assets:Broker:Stocks",
+        transaction_type="BUY",
+        source_type="csv",
+        envelope_id="test_buy_unit_price",
+        unit_price=Decimal("100"),
+        metadata={"commission": "10"},
+    )
+
+    processor = EnvelopeLotProcessor()
+    results, warnings = processor.process_envelopes([envelope])
+
+    result = results[0]
+    # cost_per_unit should be (100*10 + 10) / 10 = 101
+    assert result.unit_price == Decimal("101")
+    # outbound_units should be total_cost = 1010 (not just the commission)
+    assert result.outbound_units == Decimal("1010")
