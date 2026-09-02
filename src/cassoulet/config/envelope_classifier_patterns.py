@@ -57,24 +57,30 @@ ENVELOPE_CLASSIFIER_PATTERNS = {
     
     'interest_income_general': {
         'name': 'General Interest Income',
-        'reason': 'Interest earned in regular accounts',
+        # inbound_account is scoped to Assets: deliberately. Interest can only be
+        # EARNED into an asset account; interest arriving on a liability is interest
+        # CHARGED. This was '*', which matched Liabilities: too, so every
+        # "INTEREST CHARGED" line on the HSBC credit card was classified as interest
+        # income and stamped income_account=Income:Interest into envelope metadata -
+        # which transaction_writer then honours ahead of any account-type check.
+        'reason': 'Interest earned in regular accounts (asset accounts only)',
         'patterns': [
             {'envelope_type': 'inbound_only',  # Must be one-sided income
              'narration': '*interest*',
-             'inbound_account': '*',
+             'inbound_account': 'Assets:*',
              'amount': 'positive'},
             # Additional patterns from institution analysis:
             {'envelope_type': 'inbound_only',
              'narration': '*gross interest*',  # AJ Bell pattern
-             'inbound_account': '*',
+             'inbound_account': 'Assets:*',
              'amount': 'positive'},
             {'envelope_type': 'inbound_only',
              'narration': '*cash account interest*',  # Vanguard pattern
-             'inbound_account': '*',
+             'inbound_account': 'Assets:*',
              'amount': 'positive'},
             {'envelope_type': 'inbound_only',
              'narration': '*interest to *',  # AJ Bell "interest to DD/MM/YY"
-             'inbound_account': '*',
+             'inbound_account': 'Assets:*',
              'amount': 'positive'}
         ],
         'metadata': {
