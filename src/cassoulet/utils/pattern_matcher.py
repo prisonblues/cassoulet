@@ -113,12 +113,20 @@ _WORD_START_CACHE: Dict[str, Any] = {}
 
 
 def _word_start_pattern(keyword: str):
-    """Compiled matcher for a keyword appearing at the START of a word."""
-    cached = _WORD_START_CACHE.get(keyword)
-    if cached is None:
-        cached = re.compile(r'(?<![A-Z0-9])' + re.escape(keyword.upper()))
-        _WORD_START_CACHE[keyword] = cached
-    return cached
+    """Compiled matcher for a keyword appearing at the START of a word.
+
+    Returns None for a keyword that must never match. An EMPTY keyword is the
+    dangerous case: re.escape("") leaves a bare lookbehind, which matches at
+    position zero of every non-empty string. One blank entry in a config list
+    would therefore make its rule universal and silently swallow whatever
+    reached it first - the categorisation equivalent of a wildcard nobody wrote.
+    """
+    key = keyword.upper()
+    if key not in _WORD_START_CACHE:
+        _WORD_START_CACHE[key] = (
+            re.compile(r'(?<![A-Z0-9])' + re.escape(key)) if key.strip() else None
+        )
+    return _WORD_START_CACHE[key]
 
 
 def text_contains_any(text: str, keywords: List[str]) -> bool:
@@ -148,11 +156,27 @@ def text_contains_any(text: str, keywords: List[str]) -> bool:
     start the word - "HailoCab" no longer matches 'CAB'. That is the right
     trade: such cases are rare, and they are fixed by naming the merchant,
     whereas substring collisions are silent and unbounded.
+
+    LIMITS, so nobody assumes more than this gives:
+      - Word START, not whole word. 'PRET' still matches "PRETTY", 'SKY' still
+        matches "SKYLINE". Keywords that are also common word-beginnings stay
+        risky, and the remaining exposure depends on vocabulary luck.
+      - The boundary class is ASCII [A-Z0-9]. An accented or non-Latin letter
+        counts as a separator, so a keyword can still begin mid-word when it
+        follows one.
+      - Trailing spaces are literal. 'BP ' needs an ASCII space after it and so
+        misses "BP" at end of text, "BP-", "BP/1234".
+    Per-keyword matching modes would settle all three; a single global policy
+    cannot.
     """
     if not text:
         return False
     text_upper = text.upper()
-    return any(_word_start_pattern(str(kw)).search(text_upper) for kw in keywords)
+    for kw in keywords:
+        pattern = _word_start_pattern(str(kw))
+        if pattern is not None and pattern.search(text_upper):
+            return True
+    return False
 
 
 def parse_amount_condition(condition: str) -> Tuple[str, Optional[Decimal], Optional[Decimal]]:

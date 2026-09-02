@@ -171,3 +171,20 @@ class TestTextContainsWordBoundary:
         # A brand buried mid-word is now missed. Rare, and fixed by naming the
         # merchant - unlike substring collisions, which are silent.
         assert not self._t("HAILOCAB LONDON", ["CAB"])
+
+    def test_an_empty_keyword_never_matches(self):
+        # re.escape("") leaves a bare lookbehind, which matches position zero of
+        # every string. One blank entry in a config list would make its rule
+        # universal and silently swallow whatever reached it first.
+        assert not self._t("ANY RANDOM TEXT", [""])
+        assert not self._t("ANY RANDOM TEXT", ["   "])
+        # ...but it must not poison the rest of the list.
+        assert self._t("ESSO PETROL", ["", "ESSO"])
+
+    def test_keyword_case_is_canonicalised(self):
+        assert self._t("ESSO PETROL", ["esso"])
+        assert self._t("ESSO PETROL", ["Esso"])
+
+    def test_regex_metacharacters_are_literal(self):
+        assert self._t("SUMUP *BELLEVUE", ["*BELLEVUE"])
+        assert not self._t("SUMUP XBELLEVUE", ["*BELLEVUE"])
