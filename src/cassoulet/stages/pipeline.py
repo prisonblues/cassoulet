@@ -426,6 +426,14 @@ class Pipeline:
         envelopes_to_reconcile = pipeline_envelopes
         
         # Score potential transfers (envelope-native as of Chunk 6)
+        # A liability outflow that merely undoes an earlier payment is not
+        # spending, so mark it eligible before scoring - otherwise the two
+        # halves of one bounced payment can never reach each other.
+        from cassoulet.utils.envelope_utilities import mark_undone_liability_payments
+        _undone = mark_undone_liability_payments(envelopes_to_reconcile)
+        if _undone:
+            logger.info("  Marked %d undone liability payment(s) as transfer-eligible", _undone)
+
         logger.info("  → Scoring potential transfers...")
         scored_envelopes, scoring_warnings = self.transfer_scorer.process_envelopes(envelopes_to_reconcile)
         self.all_warnings.extend(scoring_warnings)

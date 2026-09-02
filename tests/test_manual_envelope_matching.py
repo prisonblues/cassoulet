@@ -198,3 +198,70 @@ class TestTextContainsWordBoundary:
     def test_pattern_cache_is_bounded(self):
         from cassoulet.utils.pattern_matcher import _word_start_pattern
         assert _word_start_pattern.cache_info().maxsize is not None
+
+
+class TestUndoneLiabilityPayments:
+    """A liability outflow that merely undoes an earlier payment is not spending.
+
+    Detected by SHAPE, not by wording. An outflow from a liability preceded
+    within a day by an inflow of exactly the same amount on the same account is
+    a payment being reversed: money went on, money came off, nothing was bought.
+    """
+
+    def _card(self, amount, when, eid, inbound=False):
+        from cassoulet.stages.envelope import Envelope as E
+        kw = dict(date=when, payee=None, narration="", envelope_id=eid, source_type="csv")
+        if inbound:
+            return E(inbound_units=Decimal(amount), inbound_type="GBP",
+                     inbound_account=CARD, **kw)
+        return E(outbound_units=Decimal(amount), outbound_type="GBP",
+                 outbound_account=CARD, **kw)
+
+    def _mark(self, envelopes):
+        from cassoulet.utils.envelope_utilities import mark_undone_liability_payments
+        return mark_undone_liability_payments(envelopes)
+
+    def test_a_bounced_card_payment_is_marked_eligible(self):
+        from cassoulet.utils.envelope_utilities import is_transfer_eligible
+        payment = self._card("659.19", date(2026, 3, 12), "pay", inbound=True)
+        undone = self._card("659.19", date(2026, 3, 13), "rev")
+        assert not is_transfer_eligible(undone), "outbound-from-liability starts ineligible"
+        assert self._mark([payment, undone]) == 1
+        assert is_transfer_eligible(undone), "the mark must make it reachable"
+
+    def test_ordinary_card_spending_is_untouched(self):
+        from cassoulet.utils.envelope_utilities import is_transfer_eligible
+        spend = self._card("14.45", date(2026, 3, 13), "spend")
+        assert self._mark([spend]) == 0
+        assert not is_transfer_eligible(spend)
+
+    def test_a_different_amount_is_not_a_reversal(self):
+        payment = self._card("659.19", date(2026, 3, 12), "pay", inbound=True)
+        spend = self._card("100.00", date(2026, 3, 13), "spend")
+        assert self._mark([payment, spend]) == 0
+
+    def test_more_than_a_day_later_is_not_a_reversal(self):
+        payment = self._card("659.19", date(2026, 3, 12), "pay", inbound=True)
+        late = self._card("659.19", date(2026, 3, 20), "late")
+        assert self._mark([payment, late]) == 0
+
+    def test_the_outflow_must_come_after_the_payment(self):
+        # Spending, then a coincidental payment of the same amount, is not a
+        # reversal - the order carries the meaning.
+        spend = self._card("500.00", date(2026, 3, 12), "spend")
+        payment = self._card("500.00", date(2026, 3, 13), "pay", inbound=True)
+        assert self._mark([spend, payment]) == 0
+
+    def test_no_wording_is_required(self):
+        # The whole point: a bank that says RETURNED or UNPAID instead of
+        # REVERSAL is handled identically, because nothing reads the text.
+        payment = self._card("42.00", date(2026, 1, 5), "pay", inbound=True)
+        undone = self._card("42.00", date(2026, 1, 5), "rev")
+        undone.narration = "SOMETHING ENTIRELY DIFFERENT"
+        assert self._mark([payment, undone]) == 1
+
+    def test_an_explicit_flag_is_not_overwritten(self):
+        payment = self._card("42.00", date(2026, 1, 5), "pay", inbound=True)
+        undone = self._card("42.00", date(2026, 1, 5), "rev")
+        undone.metadata["is_transfer_eligible"] = False
+        assert self._mark([payment, undone]) == 0

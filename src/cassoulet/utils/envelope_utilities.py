@@ -941,11 +941,72 @@ def is_transfer_eligible(envelope: Envelope) -> bool:
     # Skip liability account spending (credit cards, loans, mortgages)
     # Outbound from a liability = expense/spending, not a transfer
     # Payments TO a liability (inbound) are still transfer-eligible
+    #
+    # An outbound that merely UNDOES an earlier payment is not spending, and is
+    # marked eligible before scoring by mark_undone_liability_payments(). That
+    # mark arrives through the explicit metadata flag checked at the top of this
+    # function.
     if envelope.outbound_account and account_is_liability(envelope.outbound_account):
         return False
 
     # Default to eligible
     return True
+
+
+def mark_undone_liability_payments(envelopes: List[Envelope]) -> int:
+    """Mark liability outflows that merely undo an earlier payment.
+
+    When a payment to a credit card bounces, the card records the debt going
+    back up. Under the normalised convention that is an OUTBOUND movement, and
+    is_transfer_eligible() reads outbound-from-a-liability as spending and
+    refuses to score it. The bank side of the same failure is a plain inbound
+    credit and is eligible, so the two halves of one bounced payment could never
+    find each other - despite scoring 220 against a threshold of 70. Each left
+    phantom income on one side and a phantom expense on the other, and provoked
+    the gap detector into inventing further entries.
+
+    THE TEST IS STRUCTURAL, deliberately. An earlier version keyed on the word
+    "REVERSAL", which works for one bank's vocabulary and silently fails for the
+    next - "UNPAID", "RETURNED", "CANCELLED" all mean the same thing and none of
+    them match. What actually identifies a payment being undone is its shape: an
+    outflow from a liability that is preceded, within a day, by an inflow of
+    exactly the same amount on the same account. Money went on, money came off,
+    nothing was bought.
+
+    It is extremely narrow. Across the reference ledger this marks 5 postings
+    out of 6,316 liability outflows, and includes both real cases - GBP 7,977.45
+    in May 2024 and GBP 659.19 in March 2026.
+
+    Note the direction: on the LIABILITY the payment is inbound (debt falling)
+    and the undoing is outbound (debt returning), which is the mirror of how the
+    same event reads on the bank statement.
+
+    Returns the number of envelopes marked.
+    """
+    from collections import defaultdict
+
+    by_account: Dict[str, List[Envelope]] = defaultdict(list)
+    for env in envelopes:
+        account = env.outbound_account or env.inbound_account
+        if account and account_is_liability(account) and env.date:
+            by_account[account].append(env)
+
+    marked = 0
+    for account, group in by_account.items():
+        inflows = [e for e in group if has_inbound_units(e) and e.inbound_units]
+        for env in group:
+            if not (has_outbound_units(env) and env.outbound_units):
+                continue
+            if env.metadata.get('is_transfer_eligible') is not None:
+                continue
+            for inflow in inflows:
+                if (inflow.inbound_units == env.outbound_units
+                        and 0 <= (env.date - inflow.date).days <= 1):
+                    env.metadata['is_transfer_eligible'] = True
+                    env.metadata['undoes_payment_of'] = str(inflow.envelope_id)
+                    marked += 1
+                    break
+    return marked
 
 
 def is_manual_envelope(envelope: Envelope) -> bool:
