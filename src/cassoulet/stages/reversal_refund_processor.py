@@ -23,6 +23,7 @@ account the reversal should inherit.
 """
 
 import logging
+from decimal import Decimal
 from typing import Any, Dict, List, Optional, Tuple
 
 from cassoulet.stages.envelope import Envelope
@@ -30,6 +31,7 @@ from cassoulet.stages.envelope_processor import EnvelopeProcessor
 from cassoulet.base.exceptions import ProcessingWarning
 from cassoulet.utils.envelope_utilities import (
     _counterparty,
+    get_absolute_amount,
     get_primary_account,
     has_inbound_units,
     has_outbound_units,
@@ -72,6 +74,14 @@ class ReversalRefundProcessor(EnvelopeProcessor):
 
         warnings: List[ProcessingWarning] = []
 
+        # How much of each original has already been claimed. An original can
+        # legitimately be refunded in pieces - a returned order often comes back
+        # as several credits - but the pieces must not add up to more than was
+        # paid. Without this one purchase was being claimed by three separate
+        # credits, crediting its expense account three times against a single
+        # debit. 13 originals were over-claimed on the reference ledger.
+        claimed: Dict[str, Decimal] = {}
+
         # Index by account so a candidate search never scans the whole ledger.
         by_account: Dict[str, List[Envelope]] = {}
         for env in envelopes:
@@ -86,7 +96,7 @@ class ReversalRefundProcessor(EnvelopeProcessor):
             if env.metadata.get('reverses_envelope_id'):
                 continue  # already resolved, e.g. on a re-run
 
-            original = self._find_original(env, by_account, kind)
+            original = self._find_original(env, by_account, kind, claimed)
             if original is None:
                 if kind == 'refund':
                     # Most inbound money is simply not a refund. Silence here is
@@ -147,6 +157,8 @@ class ReversalRefundProcessor(EnvelopeProcessor):
                     'inherited_account': account,
                 },
             )
+            amount = get_absolute_amount(env) or Decimal(0)
+            claimed[original.envelope_id] = claimed.get(original.envelope_id, Decimal(0)) + amount
             self.stats[f'{kind}s_resolved'] += 1
 
         logger.info(
@@ -193,7 +205,8 @@ class ReversalRefundProcessor(EnvelopeProcessor):
         return False
 
     def _find_original(
-        self, env: Envelope, by_account: Dict[str, List[Envelope]], kind: str
+        self, env: Envelope, by_account: Dict[str, List[Envelope]], kind: str,
+        claimed: Dict[str, Decimal],
     ) -> Optional[Envelope]:
         account = get_primary_account(env)
         if not account or not env.date:
@@ -210,6 +223,11 @@ class ReversalRefundProcessor(EnvelopeProcessor):
             if (env.date - candidate.date).days > window:
                 continue
             if not predicate(env, candidate):
+                continue
+            # Do not claim more of an original than it was worth.
+            already = claimed.get(candidate.envelope_id, Decimal(0))
+            capacity = (get_absolute_amount(candidate) or Decimal(0)) - already
+            if (get_absolute_amount(env) or Decimal(0)) > capacity:
                 continue
             # Nearest in time wins: a repeat payee is far more likely to be
             # refunded against its most recent charge than an older one.

@@ -169,3 +169,51 @@ class TestResolution:
         reversal = _in("324.22", payee="REVERSAL OF 24-11", narration="VIRGIN MONEY", eid="rev")
         out, _ = self._run([original, reversal])
         assert len(out) == 2
+
+
+class TestOriginalConsumption:
+    """An original can be refunded in pieces, but never for more than it was worth."""
+
+    def _run(self, envelopes):
+        processor = ReversalRefundProcessor()
+        processor.process_envelopes(envelopes)
+        return processor.get_stats()
+
+    def test_split_refund_against_one_purchase_is_allowed(self):
+        # Lipoelastic: GBP 73.98 came back as 3.99 + 69.99.
+        purchase = _out("73.98", payee="Lipoelastic", when=date(2025, 4, 9), eid="buy")
+        purchase.metadata["expense_account"] = "Expenses:Healthcare"
+        first = _in("3.99", payee="Lipoelastic", when=date(2025, 4, 12), eid="r1")
+        second = _in("69.99", payee="Lipoelastic", when=date(2025, 4, 26), eid="r2")
+
+        stats = self._run([purchase, first, second])
+
+        assert first.metadata["expense_account"] == "Expenses:Healthcare"
+        assert second.metadata["expense_account"] == "Expenses:Healthcare"
+        assert stats["refunds_resolved"] == 2
+
+    def test_one_purchase_cannot_be_claimed_by_several_full_refunds(self):
+        # Three identical credits against a single charge were crediting the
+        # expense account three times over against one debit.
+        purchase = _out("10.00", payee="Milk and More", when=date(2025, 6, 3), eid="buy")
+        purchase.metadata["expense_account"] = "Expenses:Food:Groceries"
+        credits = [_in("10.00", payee="Milk and More", when=date(2025, 6, 7), eid=f"r{i}")
+                   for i in range(3)]
+
+        stats = self._run([purchase] + credits)
+
+        claimed = [c for c in credits if "expense_account" in c.metadata]
+        assert len(claimed) == 1, "only one credit may claim a single purchase"
+        assert stats["refunds_resolved"] == 1
+
+    def test_a_second_purchase_gives_a_second_refund_somewhere_to_land(self):
+        first_buy = _out("10.00", payee="Milk and More", when=date(2025, 6, 1), eid="b1")
+        first_buy.metadata["expense_account"] = "Expenses:Food:Groceries"
+        second_buy = _out("10.00", payee="Milk and More", when=date(2025, 6, 2), eid="b2")
+        second_buy.metadata["expense_account"] = "Expenses:Food:Groceries"
+        credits = [_in("10.00", payee="Milk and More", when=date(2025, 6, 7), eid=f"r{i}")
+                   for i in range(2)]
+
+        stats = self._run([first_buy, second_buy] + credits)
+
+        assert stats["refunds_resolved"] == 2
