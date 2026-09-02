@@ -991,10 +991,20 @@ class TransactionWriter(EnvelopeProcessor):
         if envelope.metadata.get('income_account'):
             return envelope.metadata['income_account']
 
-        if envelope.transaction_type == 'DIVIDEND':
-            return 'Income:Dividends'
-        elif envelope.transaction_type == 'INTEREST':
-            return 'Income:Interest'
+        # Account type constrains what a transaction type can mean. Interest and
+        # dividends arising on a liability - credit card, loan, mortgage - are
+        # amounts CHARGED to you, never received, so they are expenses. The
+        # branches below used to key off transaction_type alone, which booked
+        # every "INTEREST CHARGED" line on the HSBC credit card to Income:Interest
+        # and overstated interest income (GBP 1,941.91 in 2025/26 alone).
+        primary_account = (envelope.inbound_account or envelope.outbound_account or '')
+        on_liability = account_is_liability(primary_account)
+
+        if envelope.transaction_type in ('DIVIDEND', 'INTEREST'):
+            if on_liability:
+                return 'Expenses:Interest'
+            return ('Income:Dividends' if envelope.transaction_type == 'DIVIDEND'
+                    else 'Income:Interest')
         elif envelope.transaction_type == 'FEE':
             return 'Expenses:Fees'
         elif envelope.transaction_type == 'EXPENSE':
@@ -1002,26 +1012,30 @@ class TransactionWriter(EnvelopeProcessor):
         elif envelope.transaction_type == 'INCOME':
             return 'Income:Other'
         else:
-            # Try to guess from narration
+            # Try to guess from narration. Same constraint as above: on a
+            # liability the word "interest" means interest charged, not earned.
             narr_lower = (envelope.narration or '').lower()
             if 'dividend' in narr_lower:
-                return 'Income:Dividends'
+                return 'Expenses:Interest' if on_liability else 'Income:Dividends'
             elif 'interest' in narr_lower:
-                return 'Income:Interest'
+                return 'Expenses:Interest' if on_liability else 'Income:Interest'
             elif 'fee' in narr_lower or 'charge' in narr_lower:
                 return 'Expenses:Fees'
 
-            # Determine account type to apply correct logic
-            primary_account = (envelope.inbound_account or envelope.outbound_account or '')
-
-            # For liability accounts (credit cards, loans, mortgages),
-            # the semantics are inverted: positive = expense, negative = income/payment
-            if account_is_liability(primary_account):
-                if envelope.inbound_units and envelope.inbound_units > 0:
+            # For liability accounts (credit cards, loans, mortgages), the
+            # direction reads the opposite way round to an asset account.
+            # EnvelopeBuilder now normalises liability statements to the
+            # Beancount convention - you owe money, so the balance is negative -
+            # which means debt INCREASING is an outbound posting, not inbound.
+            # This branch previously tested inbound and so sent every card
+            # purchase to Income:Other once the convention was corrected.
+            if on_liability:
+                if envelope.outbound_units and envelope.outbound_units > 0:
                     # Debt increasing = you spent money = Expense
                     return 'Expenses:UK:Unknown'
                 else:
-                    # Debt decreasing = payment or refund
+                    # Debt decreasing = payment or refund. A bill payment should
+                    # have been matched to its bank leg before reaching here.
                     return 'Income:Other'
 
             # For asset accounts, standard logic applies

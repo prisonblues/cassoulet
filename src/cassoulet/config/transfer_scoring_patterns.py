@@ -532,6 +532,31 @@ TRANSFER_SCORING_PATTERNS = {
         }
     },
 
+    'credit_card_bill_payment': {
+        'name': 'Credit Card Bill Payment',
+        'reason': 'Bank pays the card statement - a transfer between own accounts',
+        'patterns': [
+            {
+                'one_account_is_credit_card_one_is_bank': True,
+                'amount_match_quality': '>94',
+                'transfer_delay': '0-3',
+            }
+        ],
+        'metadata': {
+            # Paying the card is a transfer, not income. Left unmatched, the bank
+            # leg lands in Expenses:Uncategorized:Large and the card leg in
+            # Income:Other, which reads as earnings - GBP 50,293.09 of it across
+            # 2025/26 alone, on 60 postings.
+            #
+            # The account-type test is what makes this safe. On 2025-05-23 there
+            # were two GBP 1,000 withdrawals from HSBC checking: one to the card
+            # ("PREM W E 519958") and one to Starling ("Float"). Amount and date
+            # agree for both; only the account type separates them. Scored below
+            # an explicit match directive (200) so a manual instruction still wins.
+            'score': 70,
+        }
+    },
+
     'credit_card_broker_invalid': {
         'name': 'Credit Card to Broker Invalid',
         'reason': 'Credit card and broker accounts cannot transfer directly',

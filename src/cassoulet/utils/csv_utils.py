@@ -87,29 +87,47 @@ HEADER_PATTERNS = {
 }
 
 
+def _squash(text: str) -> str:
+    """Reduce a header or pattern to comparable form: alphanumerics only.
+
+    Banks write the same field a dozen ways - "Counterparty", "Counter Party",
+    "Counter-Party", "COUNTER_PARTY" - and only the spelling differs, never the
+    meaning. Comparing on alphanumerics alone makes the separator irrelevant so
+    HEADER_PATTERNS does not have to enumerate every punctuation variant. The
+    list still carries hand-written squashed entries ('paidout' beside
+    'paid out') from before this existed; they are harmless duplicates now.
+    """
+    return ''.join(c for c in normalize_string(text) if c.isalnum())
+
+
 def detect_semantic_field(header: str) -> Optional[str]:
     """
     Detect the semantic field type for a header.
-    
+
     Args:
         header: Column header
-        
+
     Returns:
         Semantic field name or None
     """
     normalized = normalize_string(header)
-    
+    squashed = _squash(header)
+
     for field, patterns in HEADER_PATTERNS.items():
         for pattern in patterns:
             pattern_normalized = normalize_string(pattern)
-            # Exact match
-            if normalized == pattern_normalized:
+            pattern_squashed = _squash(pattern)
+            # Exact match, separator-insensitive
+            if normalized == pattern_normalized or squashed == pattern_squashed:
                 return field
             # Contained match for meaningful patterns
             if len(pattern_normalized) > 3:
                 if pattern_normalized in normalized:
                     return field
-    
+            if len(pattern_squashed) > 3:
+                if pattern_squashed in squashed:
+                    return field
+
     return None
 
 
