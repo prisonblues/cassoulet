@@ -174,6 +174,17 @@ NO_MATCH_PATTERNS = {
         }
     },
     
+    # KNOWN DEFECT, repo-wide: nothing in this file currently takes effect.
+    # Every rule here writes 'transfer-eligible' (hyphen) into envelope
+    # metadata, and apply_patterns_to_envelopes merges the key verbatim, but
+    # is_transfer_eligible() reads 'is_transfer_eligible'. The keys never meet,
+    # so direct debits, merchant card payments, fees, ATM withdrawals, salary
+    # and dividends are all still offered to the transfer scorer. Fixing the
+    # key will switch roughly ten dormant exclusions on at once - including one
+    # that would catch the BANK leg of a card bill collected by direct debit
+    # ("DIRECT DEBIT AMEX"), which this rule does not cover. Do that as its own
+    # change, with both legs handled together.
+    #
     # ORDER MATTERS: first match wins, so this sits ABOVE 'direct_debits'.
     # A card bill is very often collected BY direct debit, so the card leg reads
     # "DIRECT DEBIT PAYMENT - THANK YOU" and the rule below would mark it

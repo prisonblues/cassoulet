@@ -120,6 +120,17 @@ class EnvelopeBuilder:
         # those columns mean on a liability statement varies by provider, so
         # those stay explicit configuration.
         if account and account_is_liability(account):
+            if sign_convention in ('debit_credit', 'payment_receipt'):
+                # No importer routes a liability through these today. If one
+                # ever does, its direction is NOT normalised here and the
+                # account will import inverted, so say so loudly rather than
+                # let it through silently.
+                logger.warning(
+                    "Liability account %s uses sign_convention=%s, which is not "
+                    "normalised to the Beancount convention. Verify that a charge "
+                    "produces an outbound posting and a payment an inbound one.",
+                    account, sign_convention,
+                )
             sign_convention = {
                 'standard': 'reversed',
                 'reversed': 'standard',

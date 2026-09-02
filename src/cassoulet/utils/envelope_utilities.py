@@ -1787,12 +1787,16 @@ def transfer_delay(env1: Envelope, env2: Envelope) -> Optional[int]:
     # Use the flow pattern to determine dates
     flow = compat.get('flow_pattern')
 
-    # envelope_compatibility_checks names the same flow from either side:
-    # 'env1_sends_env2_receives' and 'env2_receives_env1_sends' describe one
-    # situation, and which name you get depends only on the argument order the
-    # scorer happened to use. Handling just one spelling made this function
-    # return None for half of all pairs, silently dropping the date signal -
-    # a same-day transfer scored 220 in one order and 350 in the other.
+    # analyze_flow_pattern() names the direction from env1's point of view, so
+    # the SAME pair yields 'env1_sends_env2_receives' or
+    # 'env1_receives_env2_sends' purely according to the argument order the
+    # scorer happened to use. Only the first was handled, so this returned None
+    # for half of all pairs and silently dropped the date signal - one same-day
+    # transfer scored 220 in one order and 350 in the other.
+    #
+    # The 'env2_*' spellings below are defensive only: analyze_flow_pattern does
+    # not currently emit them. They are cheap to accept and cost nothing if a
+    # future producer names a flow from env2's side.
     if flow in ('env1_sends_env2_receives', 'env2_receives_env1_sends'):
         # env1 sends, env2 receives
         outbound_date = env1.date
@@ -2383,13 +2387,18 @@ def is_expense_envelope(envelope: Envelope) -> bool:
     """Check if envelope is an expense.
 
     For asset accounts (banks, brokers): outbound = expense
-    For liability accounts (credit cards): inbound (debt increasing) = expense
+    For liability accounts (credit cards): outbound (debt increasing) = expense
+
+    EnvelopeBuilder normalises liability statements to the Beancount convention,
+    so debt increasing is an OUTBOUND posting. This branch tested inbound until
+    that landed, which stopped credit card purchases appearing in the
+    uncategorised-expense report.
     """
     # Check for liability accounts (credit cards, loans)
     primary_account = envelope.inbound_account or envelope.outbound_account or ''
     if account_is_liability(primary_account):
-        # For liabilities: inbound (debt increasing) = expense
-        return has_inbound_units(envelope) and not has_outbound_units(envelope)
+        # For liabilities: outbound (debt increasing) = expense
+        return has_outbound_units(envelope) and not has_inbound_units(envelope)
     else:
         # For assets: outbound = expense
         return has_outbound_units(envelope) and not has_inbound_units(envelope)
@@ -2399,13 +2408,17 @@ def is_income_envelope(envelope: Envelope) -> bool:
     """Check if envelope is income.
 
     For asset accounts (banks, brokers): inbound = income
-    For liability accounts (credit cards): outbound (debt decreasing) = refund/payment
+    For liability accounts (credit cards): inbound (debt decreasing) = refund/payment
+
+    Mirror of is_expense_envelope: under the normalised convention debt
+    DECREASING is an inbound posting. Note this is "not an expense" rather than
+    "income" - a bill payment and a refund both land here and neither is income.
     """
     # Check for liability accounts (credit cards, loans)
     primary_account = envelope.inbound_account or envelope.outbound_account or ''
     if account_is_liability(primary_account):
-        # For liabilities: outbound (debt decreasing) = income/refund
-        return has_outbound_units(envelope) and not has_inbound_units(envelope)
+        # For liabilities: inbound (debt decreasing) = refund/payment
+        return has_inbound_units(envelope) and not has_outbound_units(envelope)
     else:
         # For assets: inbound = income
         return has_inbound_units(envelope) and not has_outbound_units(envelope)
@@ -2426,10 +2439,19 @@ def check_envelope_type(envelope: Envelope, required_type: str) -> bool:
     Returns:
         True if envelope structure matches requirement
     """
+    # STRUCTURAL test, deliberately not an economic one. 'envelope_type' is the
+    # shape key used by every pattern config, and it must mean literally "has
+    # outbound units and no inbound units".
+    #
+    # This used to delegate to is_expense_envelope/is_income_envelope. On an
+    # asset account the two readings coincide, so the conflation was invisible -
+    # but those helpers invert for liabilities (debt increasing is spending),
+    # which made 'outbound_only' silently mean "is spending" and flipped the
+    # meaning of every pattern applied to a card or loan.
     if required_type == 'outbound_only':
-        return is_expense_envelope(envelope)
+        return has_outbound_units(envelope) and not has_inbound_units(envelope)
     elif required_type == 'inbound_only':
-        return is_income_envelope(envelope)
+        return has_inbound_units(envelope) and not has_outbound_units(envelope)
     elif required_type == 'both':
         return is_transfer_envelope(envelope)
     return True  # Unknown type = no restriction
