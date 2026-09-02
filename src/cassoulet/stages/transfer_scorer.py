@@ -18,12 +18,15 @@ from cassoulet.utils.pattern_matcher import PatternMatcher
 from cassoulet.config.transfer_scoring_patterns import TRANSFER_SCORING_PATTERNS
 from cassoulet.stages._compiled_patterns import compile_patterns
 import cassoulet.utils.envelope_utilities as eu
+from cassoulet.utils.accounts import account_is_liability
 from cassoulet.utils.envelope_utilities import (
     enhance_envelope,
     get_absolute_amount,
     match_pattern_pair,
     build_envelope_date_index,
     find_envelopes_in_date_window,
+    has_flow,
+    is_manual_envelope,
     is_transfer_eligible,
     _check_value_match,
     can_aggregate,
@@ -42,6 +45,9 @@ _NUM_WORKERS = max((os.cpu_count() or 1) * 3 // 4, 1)
 # Workers read these directly — no pickling overhead.
 _shared_envelopes: Optional[List] = None
 _shared_date_index: Optional[Dict] = None
+# A SECOND index over every envelope, consulted only when the subject is a
+# manual entry. See _process_internal for why there are two.
+_shared_full_date_index: Optional[Dict] = None
 _shared_compiled_groups: Optional[List] = None
 _shared_pattern_functions: Optional[Dict] = None
 _shared_field_names: Optional[List] = None
@@ -63,41 +69,31 @@ def _score_chunk(indices: List[int]) -> Dict[int, List[Dict]]:
     """
     all_envelopes = _shared_envelopes
     date_index = _shared_date_index
+    full_date_index = _shared_full_date_index
     compiled_groups = _shared_compiled_groups
     pattern_functions = _shared_pattern_functions
     field_names = _shared_field_names
 
     results: Dict[int, List[Dict]] = {}
 
-    for i in indices:
-        envelope = all_envelopes[i]
-
-        if not is_transfer_eligible(envelope):
-            continue
-
-        window_candidates = find_envelopes_in_date_window(
-            envelope, all_envelopes, date_index=date_index, window_days=30
-        )
-
-        candidates = []
-        for candidate in window_candidates:
+    def _collect(envelope, index, relax_eligibility):
+        """Score every candidate for one envelope against one index."""
+        found = []
+        for candidate in find_envelopes_in_date_window(
+                envelope, all_envelopes, date_index=index, window_days=30):
             if candidate.metadata and candidate.metadata.get('matched_with'):
                 continue
-            if not is_transfer_eligible(candidate):
+            if not relax_eligibility and not is_transfer_eligible(candidate):
                 continue
-
             # Early exit: pair must be aggregatable or reconcilable
             if not (can_aggregate(envelope, candidate)
                     or can_reconcile(envelope, candidate)):
                 continue
-
             score, pattern_details = _score_pair_impl(
-                envelope, candidate, compiled_groups, pattern_functions,
-                field_names,
+                envelope, candidate, compiled_groups, pattern_functions, field_names,
             )
-
             if score > 0:
-                candidates.append({
+                found.append({
                     'envelope_id': candidate.envelope_id,
                     'score': score,
                     'patterns_matched': [p['pattern_id'] for p in pattern_details],
@@ -106,6 +102,54 @@ def _score_chunk(indices: List[int]) -> Dict[int, List[Dict]]:
                     'amount': str(get_absolute_amount(candidate)),
                     'type': candidate.outbound_type or candidate.inbound_type,
                 })
+        return found
+
+    for i in indices:
+        envelope = all_envelopes[i]
+
+        # A manual entry exists to be matched - that is its whole purpose - so
+        # it is always scored, even when transfer eligibility would reject it.
+        # Eligibility answers "could this be a transfer between accounts", which
+        # is the wrong question for reconciliation: reconciliation is two views
+        # of the SAME transaction, and card spending is an ordinary thing to
+        # hold two views of.
+        # Eligibility first. It is the cheap check, and it is the one that
+        # screens out remediation stubs - which matters here because
+        # is_manual_envelope() RAISES on an envelope with no source_type, and
+        # gap-remediation envelopes have none. Calling it up front killed the
+        # whole scorer: "TransferScorer: Failed with exception ... missing
+        # source_type field", 0 matches made, 193 balance errors.
+        if not is_transfer_eligible(envelope):
+            # Precisely one reason to override: a MANUAL entry describing
+            # spending on a liability. Reconciliation is two views of the SAME
+            # transaction and card spending is an ordinary thing to hold two
+            # views of, but eligibility answers "could this be a transfer
+            # between accounts" and rejects it. Compare source_type directly
+            # rather than via is_manual_envelope, which raises when it is unset.
+            if not (envelope.source_type == 'beancount'
+                    and has_flow(envelope)
+                    and envelope.outbound_account is not None
+                    and account_is_liability(envelope.outbound_account)):
+                continue
+            manual_liability_spend = True
+        else:
+            manual_liability_spend = False
+
+        candidates = _collect(envelope, date_index, relax_eligibility=False)
+
+        # FALLBACK, manual subjects only, and only when the normal search found
+        # nothing. The row a manual entry describes is often card spending,
+        # which the eligible-only index omits - so the entry could not reach its
+        # counterpart however permissive the downstream gates were, and was
+        # written out alongside it instead, double-counting the spend.
+        #
+        # It has to be a fallback rather than the default. Letting every manual
+        # entry search the full index up front changed which counterpart the
+        # EXISTING broker entries found first, and took balance errors from 12
+        # to 193 across HSBC Checking and the SIPPs. Anything that already finds
+        # a candidate keeps exactly the behaviour it had.
+        if manual_liability_spend and not candidates:
+            candidates = _collect(envelope, full_date_index, relax_eligibility=True)
 
         if candidates:
             candidates.sort(key=lambda x: x['score'], reverse=True)
@@ -168,6 +212,7 @@ class TransferScorer(EnvelopeProcessor):
         """
         global _shared_envelopes, _shared_date_index
         global _shared_compiled_groups, _shared_pattern_functions, _shared_field_names
+        global _shared_full_date_index
 
         warnings = []
         metadata = {
@@ -176,12 +221,34 @@ class TransferScorer(EnvelopeProcessor):
             'patterns_applied': {},
         }
 
-        # Build date index for efficient date-window searching
-        logger.info(f"Building date index for {len(envelopes)} envelopes...")
+        # TWO indexes, deliberately.
+        #
+        # The eligible-only index drives CSV-to-CSV matching and is unchanged.
+        # Widening it was tried and is not viable: indexing everything for every
+        # subject altered matching across the whole ledger and took balance
+        # errors from 12 to 193, because thousands of card purchases suddenly
+        # became transfer candidates for coincidental same-amount bank debits.
+        #
+        # The full index is consulted ONLY when the subject is a manual entry.
+        # That is the narrow case that was broken - the row a manual entry
+        # describes is often card spending, which the eligible-only index omits,
+        # so the entry could not find its counterpart no matter what the
+        # downstream gates said. Restricting the index decided the question
+        # before the pair existed.
+        logger.info(f"Building date indexes for {len(envelopes)} envelopes...")
         date_index = build_envelope_date_index(envelopes, transfer_eligible_only=True)
+        # Remediation stubs are excluded explicitly. They are not a valid
+        # reconciliation counterpart for anything, and they carry no
+        # source_type - which is fatal here rather than merely useless, because
+        # can_reconcile() reaches is_manual_envelope() and that RAISES on an
+        # unset source_type. Leaving them in killed the entire scorer.
+        full_date_index = build_envelope_date_index(
+            [e for e in envelopes if e.source_type], transfer_eligible_only=False
+        )
         eligible_count = sum(len(v) for v in date_index.values())
         logger.info(f"Date index built: {len(date_index)} unique dates, "
-                     f"{eligible_count} transfer-eligible envelopes")
+                     f"{eligible_count} transfer-eligible envelopes "
+                     f"({sum(len(v) for v in full_date_index.values())} total for manual matching)")
 
         # Separate scoring vs skipped envelopes
         scoring_indices = []
@@ -210,6 +277,7 @@ class TransferScorer(EnvelopeProcessor):
         # Set module globals before forking (inherited via COW, no pickle cost)
         _shared_envelopes = envelopes
         _shared_date_index = date_index
+        _shared_full_date_index = full_date_index
         _shared_compiled_groups = self._compiled_groups
         _shared_pattern_functions = self._pattern_functions
         _shared_field_names = self._field_names
@@ -245,6 +313,7 @@ class TransferScorer(EnvelopeProcessor):
         # Clean up module globals
         _shared_envelopes = None
         _shared_date_index = None
+        _shared_full_date_index = None
         _shared_compiled_groups = None
         _shared_pattern_functions = None
         _shared_field_names = None
