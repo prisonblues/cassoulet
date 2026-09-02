@@ -47,7 +47,10 @@ logger = logging.getLogger(__name__)
 # refund is a different animal: card refunds routinely take weeks, and a returned
 # order can be refunded in pieces, so the payee agreement has to carry the weight
 # over a much longer window.
-REVERSAL_MAX_DAYS = 7
+# Same day, and not a day more. Every true reversal in the reference data
+# posts both legs on one date; widening it admits ordinary spending that
+# happens to reverse an earlier amount.
+REVERSAL_MAX_DAYS = 0
 REFUND_MAX_DAYS = 120
 
 # Employer expense-reimbursement suggestions.
@@ -158,13 +161,20 @@ class ReversalRefundProcessor(EnvelopeProcessor):
                 by_account.setdefault(account, []).append(env)
 
         for env in envelopes:
-            kind = self._kind(env)
-            if kind is None:
+            if not self._is_candidate(env):
                 continue
             if env.metadata.get('reverses_envelope_id'):
                 continue  # already resolved, e.g. on a re-run
 
+            # Reversal first: it is the stronger claim - same day, exact amount,
+            # and it must be unambiguous - so anything it takes is not offered to
+            # the much looser refund rule, which allows partial amounts over 120
+            # days and would otherwise attach the same leg to an older charge.
+            kind = 'reversal'
             original = self._find_original(env, by_account, kind, claimed)
+            if original is None:
+                kind = 'refund'
+                original = self._find_original(env, by_account, kind, claimed)
             if original is None:
                 if kind == 'refund':
                     # Most inbound money is simply not a refund. Silence here is
@@ -235,6 +245,12 @@ class ReversalRefundProcessor(EnvelopeProcessor):
             self.stats['refunds_resolved'],
             self.stats['unresolved'],
         )
+        audit = self._audit_bank_marked_reversals(envelopes)
+        if audit:
+            logger.info(
+                "  %d bank-marked reversal(s) the structural rule did not pair", len(audit)
+            )
+        warnings.extend(audit)
         warnings.extend(self._suggest_reimbursement_claims(envelopes))
         return envelopes, warnings
 
@@ -357,33 +373,69 @@ class ReversalRefundProcessor(EnvelopeProcessor):
             )
         return found
 
-    def _kind(self, env: Envelope) -> Optional[str]:
-        """'reversal', 'refund', or None for the returning leg of a pair.
+    def _audit_bank_marked_reversals(self, envelopes: List[Envelope]) -> List[ProcessingWarning]:
+        """Warn where the bank said "reversal" and the structural rule disagreed.
 
-        A reversal announces itself in the payee, so it is cheap and certain to
-        spot. A refund does not - it is only a refund by virtue of an earlier
-        purchase existing - so the pairing has to establish it.
+        THIS DOES NOT MATCH ANYTHING. Detection is entirely structural; this
+        reads the marker only to check that decision, and a warning here means
+        the structural rule needs looking at, not that the text should be
+        matched on.
 
-        The gate for a refund candidate is that money is coming BACK, which
-        under the normalised convention is an inbound posting on either an asset
-        (cash arriving) or a liability (debt decreasing). That skips ordinary
-        spending, which is the overwhelming majority of any statement, so the
-        candidate search stays cheap.
+        Keeping it costs nothing and preserves the one thing the text gave us
+        that structure cannot: a bank writing "REVERSAL OF" is asserting that
+        this leg IS a reversal, so failing to pair it is an anomaly. Structure
+        alone can never raise that, because an inbound leg that pairs with
+        nothing is overwhelmingly just ordinary income.
 
-        Envelopes already carrying a specific account are left alone: something
-        upstream identified them and this stage should not second-guess it.
+        Only HSBC writes this marker, so it audits a subset. Delete it and the
+        detector is unaffected.
         """
-        if (env.payee or '').strip().upper().startswith('REVERSAL OF'):
-            return 'reversal'
-        # Card statements leave the payee empty and put the merchant in the
-        # narration, so key off whichever the bank populated.
-        if not _counterparty(env):
-            return None
+        warnings: List[ProcessingWarning] = []
+        for env in envelopes:
+            if not (env.payee or '').strip().upper().startswith('REVERSAL OF'):
+                continue
+            if env.metadata.get('reverses_envelope_id'):
+                continue
+            warnings.append(ProcessingWarning(
+                processor_name=self.processor_name,
+                severity='WARNING',
+                message=(
+                    "Bank marked this a reversal but no same-day matching charge "
+                    f"was found: {env.payee or env.narration}"
+                ),
+                source_transaction=None,
+                details={
+                    'envelope_id': env.envelope_id,
+                    'date': str(env.date),
+                    'account': get_primary_account(env),
+                    'note': 'audit of the structural rule; detection reads no text',
+                },
+            ))
+        return warnings
+
+    def _is_candidate(self, env: Envelope) -> bool:
+        """Could this envelope be money coming back?
+
+        The gate is direction: under the normalised convention that is an
+        inbound posting on either an asset (cash arriving) or a liability (debt
+        decreasing). That skips ordinary spending, which is the overwhelming
+        majority of any statement.
+
+        Envelopes already carrying a specific account are left alone. Something
+        upstream identified them and this stage should not second-guess it - and
+        that single check is what keeps pass-throughs out. Money arriving to fund
+        a payment leaving the same day has exactly a reversal's shape, and the
+        only thing separating them is that the funding leg has already been
+        recognised: merged as an internal transfer, or categorised to a real
+        account such as a family contribution. 56 of the 93 same-day pairs in
+        the reference ledger are that, and they are excluded here rather than by
+        anything reading their description.
+        """
         if not has_inbound_units(env) or has_outbound_units(env):
-            return None
+            return False
         if self._has_specific_account(env):
-            return None
-        return 'refund'
+            return False
+        return True
 
     def _has_specific_account(self, env: Envelope) -> bool:
         for key in ('expense_account', 'income_account'):
@@ -401,6 +453,27 @@ class ReversalRefundProcessor(EnvelopeProcessor):
             return None
         window = REVERSAL_MAX_DAYS if kind == 'reversal' else REFUND_MAX_DAYS
         predicate = is_reversal_of if kind == 'reversal' else is_refund_of
+
+        # A reversal must be unambiguous. Its whole claim is that these two legs
+        # are one undone event, and with no counterparty to disambiguate, two
+        # equal outgoings on the same day make that unprovable - so decline
+        # rather than pick. Three keys in the reference ledger are like this.
+        # A refund keeps the nearest-in-time tiebreak below: the counterparty has
+        # to agree there, which is what makes choosing defensible.
+        #
+        # No _has_specific_account check on the candidate: the ORIGINAL is
+        # expected to carry a real account - inheriting it is the entire point.
+        # Pass-throughs are excluded at the candidate gate instead, where the
+        # leg being tested is the money arriving.
+        if kind == 'reversal':
+            matches = [
+                c for c in by_account.get(account, [])
+                if c is not env and c.date == env.date and predicate(env, c)
+                and (get_absolute_amount(env) or Decimal(0))
+                <= (get_absolute_amount(c) or Decimal(0))
+                - claimed.get(c.envelope_id, Decimal(0))
+            ]
+            return matches[0] if len(matches) == 1 else None
 
         best = None
         for candidate in by_account.get(account, []):

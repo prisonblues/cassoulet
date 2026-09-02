@@ -39,10 +39,12 @@ class TestReversalDetection:
         assert is_reversal_of(reversal, original)
         assert is_reversal_of(original, reversal), "argument order must not matter"
 
-    def test_reversal_naming_a_different_payee_is_rejected(self):
+    def test_the_payee_is_irrelevant(self):
+        """Detection is structural. Banks that never write "REVERSAL OF" - or
+        write it in another language - are covered by exactly the same rule."""
         original = _out("324.22", payee="VIRGIN MONEY", eid="orig")
-        reversal = _in("324.22", payee="REVERSAL OF 24-11", narration="SOMEONE ELSE", eid="rev")
-        assert not is_reversal_of(reversal, original)
+        reversal = _in("324.22", payee="SOMETHING ELSE ENTIRELY", eid="rev")
+        assert is_reversal_of(reversal, original)
 
     def test_reversal_on_a_different_account_is_rejected(self):
         original = _out("324.22", payee="VIRGIN MONEY", eid="orig")
@@ -55,9 +57,16 @@ class TestReversalDetection:
         reversal = _in("99.00", payee="REVERSAL OF 24-11", narration="VIRGIN MONEY", eid="rev")
         assert not is_reversal_of(reversal, original)
 
-    def test_two_reversals_are_not_a_pair(self):
-        a = _in("324.22", payee="REVERSAL OF 24-11", narration="VIRGIN MONEY", eid="a")
-        b = _out("324.22", payee="REVERSAL OF 24-11", narration="VIRGIN MONEY", eid="b")
+    def test_a_different_day_is_not_a_reversal(self):
+        """Same-day is load-bearing: widen it and ordinary spending that happens
+        to reverse an earlier amount starts pairing."""
+        original = _out("324.22", payee="VIRGIN MONEY", when=date(2025, 11, 24), eid="orig")
+        reversal = _in("324.22", payee="VIRGIN MONEY", when=date(2025, 11, 25), eid="rev")
+        assert not is_reversal_of(reversal, original)
+
+    def test_same_direction_is_not_a_reversal(self):
+        a = _in("324.22", payee="VIRGIN MONEY", eid="a")
+        b = _in("324.22", payee="VIRGIN MONEY", eid="b")
         assert not is_reversal_of(a, b)
 
 
@@ -135,16 +144,27 @@ class TestResolution:
 
         assert refund.metadata["expense_account"] == "Expenses:Shopping:Recent"
 
-    def test_original_must_precede_the_reversal(self):
+    def test_a_charge_on_another_day_is_not_reversed(self):
         later = _out("324.22", payee="VIRGIN MONEY", when=date(2025, 12, 1), eid="later")
         later.metadata["expense_account"] = "Expenses:Utilities:Mobile"
-        reversal = _in("324.22", payee="REVERSAL OF 24-11", narration="VIRGIN MONEY",
-                       when=date(2025, 11, 24), eid="rev")
+        reversal = _in("324.22", payee="VIRGIN MONEY", when=date(2025, 11, 24), eid="rev")
 
         _, stats = self._run([later, reversal])
 
         assert "expense_account" not in reversal.metadata
-        assert stats["unresolved"] == 1
+
+    def test_two_equal_charges_on_one_day_are_declined_not_guessed(self):
+        """With no counterparty to disambiguate, which charge was undone is
+        unprovable - so decline. Guessing would corrupt one of them."""
+        a = _out("50.00", payee="SHOP A", eid="a")
+        a.metadata["expense_account"] = "Expenses:Shopping"
+        b = _out("50.00", payee="SHOP B", eid="b")
+        b.metadata["expense_account"] = "Expenses:Groceries"
+        back = _in("50.00", payee="EITHER", eid="back")
+
+        self._run([a, b, back])
+
+        assert "reverses_envelope_id" not in back.metadata
 
     def test_refund_outside_the_window_is_left_alone(self):
         purchase = _out("50.00", payee="Vinted", when=date(2025, 1, 1), eid="buy")
@@ -313,3 +333,36 @@ class TestReimbursementSuggestions:
         before = dict(claim.metadata)
         self._suggest([claim, exp])
         assert claim.metadata == before, "suggestions must not mutate the claim"
+
+
+def test_the_bank_marker_audits_but_never_matches():
+    """The marker must not resolve anything on its own.
+
+    Detection is structural. A bank-marked reversal whose charge is on another
+    day stays unresolved and is reported - the text is a check on the structural
+    rule, never a substitute for it.
+    """
+    from cassoulet.stages.reversal_refund_processor import ReversalRefundProcessor
+    charge = _out("324.22", payee="VIRGIN MONEY", when=date(2025, 11, 20), eid="orig")
+    charge.metadata["expense_account"] = "Expenses:Utilities:Mobile"
+    marked = _in("324.22", payee="REVERSAL OF 20-11", narration="VIRGIN MONEY",
+                 when=date(2025, 11, 24), eid="rev")
+
+    proc = ReversalRefundProcessor()
+    envelopes, warnings = proc._process_internal([charge, marked])[:2]
+
+    assert "reverses_envelope_id" not in marked.metadata
+    assert any("Bank marked this a reversal" in w.message for w in warnings)
+
+
+def test_a_same_day_partial_refund_is_still_a_refund():
+    """Same-day does not mean reversal when the amounts differ.
+
+    A GBP 9.90 credit against a GBP 29.70 charge at one merchant on one day is a
+    partial refund. Treating every same-day pair as the reversal rule's business
+    left this one unmatched and put the money back in Income:Other.
+    """
+    charge = _out("29.70", payee="NORTHCOTE LONDON", when=date(2025, 9, 29), eid="c")
+    back = _in("9.90", payee="NORTHCOTE LONDON", when=date(2025, 9, 29), eid="b")
+    assert is_refund_of(back, charge)
+    assert not is_reversal_of(back, charge), "amounts differ, so not a reversal"
