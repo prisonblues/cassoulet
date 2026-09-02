@@ -188,3 +188,13 @@ class TestTextContainsWordBoundary:
     def test_regex_metacharacters_are_literal(self):
         assert self._t("SUMUP *BELLEVUE", ["*BELLEVUE"])
         assert not self._t("SUMUP XBELLEVUE", ["*BELLEVUE"])
+
+    def test_boundary_is_unicode_aware(self):
+        # ASCII [A-Z0-9] treated an accented letter as a separator, which let a
+        # keyword begin mid-word again.
+        assert not self._t("CAFÉEON BAR", ["EON"])
+        assert not self._t("FOO_ESSO", ["ESSO"])
+
+    def test_pattern_cache_is_bounded(self):
+        from cassoulet.utils.pattern_matcher import _word_start_pattern
+        assert _word_start_pattern.cache_info().maxsize is not None

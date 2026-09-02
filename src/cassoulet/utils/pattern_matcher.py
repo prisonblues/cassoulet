@@ -18,6 +18,7 @@ Standalone utility functions (use these directly):
 """
 
 import re
+from functools import lru_cache
 from decimal import Decimal, InvalidOperation
 from typing import Dict, List, Optional, Any, Pattern as RePattern, Union, Tuple
 
@@ -109,9 +110,7 @@ def match_wildcard(text: str, pattern: str) -> bool:
         return bool(data.match(text_upper))
 
 
-_WORD_START_CACHE: Dict[str, Any] = {}
-
-
+@lru_cache(maxsize=512)
 def _word_start_pattern(keyword: str):
     """Compiled matcher for a keyword appearing at the START of a word.
 
@@ -122,15 +121,17 @@ def _word_start_pattern(keyword: str):
     reached it first - the categorisation equivalent of a wildcard nobody wrote.
     """
     key = keyword.upper()
-    if key not in _WORD_START_CACHE:
-        _WORD_START_CACHE[key] = (
-            re.compile(r'(?<![A-Z0-9])' + re.escape(key)) if key.strip() else None
-        )
-    return _WORD_START_CACHE[key]
+    if not key.strip():
+        return None
+    # (?<!\w) rather than (?<![A-Z0-9]): \w is Unicode-aware, so an accented or
+    # non-Latin letter is treated as part of a word rather than as a separator.
+    # With the ASCII class, "CAFEEON" spelled with an accent would have let 'EON'
+    # begin mid-word again, and "FOO_ESSO" would have matched 'ESSO'.
+    return re.compile(r'(?<!\w)' + re.escape(key))
 
 
 def text_contains_any(text: str, keywords: List[str]) -> bool:
-    """Check whether any keyword begins a word in text (case-insensitive).
+    r"""Check whether any keyword begins a word in text (case-insensitive).
 
     WORD START, not bare substring. A keyword may run on into the rest of the
     word - "AMZN" still matches "AMZNMKTPLACE" - but it may not begin midway
@@ -161,9 +162,8 @@ def text_contains_any(text: str, keywords: List[str]) -> bool:
       - Word START, not whole word. 'PRET' still matches "PRETTY", 'SKY' still
         matches "SKYLINE". Keywords that are also common word-beginnings stay
         risky, and the remaining exposure depends on vocabulary luck.
-      - The boundary class is ASCII [A-Z0-9]. An accented or non-Latin letter
-        counts as a separator, so a keyword can still begin mid-word when it
-        follows one.
+      - The boundary is Python's Unicode-aware \w, so letters, digits and the
+        underscore all count as word characters.
       - Trailing spaces are literal. 'BP ' needs an ASCII space after it and so
         misses "BP" at end of text, "BP-", "BP/1234".
     Per-keyword matching modes would settle all three; a single global policy
