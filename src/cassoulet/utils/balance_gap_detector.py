@@ -18,6 +18,22 @@ from cassoulet.utils.envelope_utilities import create_envelope
 
 logger = logging.getLogger(__name__)
 
+# Where remediation for an unexplained balance gap is posted.
+#
+# A gap means the statement balance and the sum of imported transactions
+# disagree: money moved and we do not know why. That is a plug, not a fact, and
+# it must never masquerade as one. Previously the two legs went to Income:Other
+# and Expenses:UK:Unknown, so invented entries were indistinguishable from real
+# income and real spending - GBP 775.66 of fabricated income in a single UK tax
+# year in the reference ledger, some of it duplicating reversals the importer
+# had already seen.
+#
+# Equity rather than Assets:Suspense: holding a suspense ASSET implies you own
+# something identifiable, whereas this is an admission that the books do not
+# balance yet. One account for both directions, so the sign shows which way the
+# gap ran and the balance can be watched toward zero as data is filled in.
+BALANCE_GAP_PLUG_ACCOUNT = 'Equity:Plug:BalanceGap'
+
 
 @dataclass
 class BalanceGap:
@@ -217,7 +233,7 @@ def create_remediations(gaps: List[BalanceGap]) -> List[Envelope]:
             # Always ADD to account from Income:Other (regardless of sign)
             inbound_account = gap.account
             inbound_units = abs(gap.gap_amount)
-            outbound_account = 'Income:Other'
+            outbound_account = BALANCE_GAP_PLUG_ACCOUNT
             outbound_units = abs(gap.gap_amount)
         elif gap.gap_type == 'balance_error':
             # Balance errors: Gap = CSV_balance - calculated_from_transactions
@@ -230,13 +246,13 @@ def create_remediations(gaps: List[BalanceGap]) -> List[Envelope]:
                 # Negative gap: CSV balance < calculated, need to SUBTRACT
                 outbound_account = gap.account
                 outbound_units = abs(gap.gap_amount)
-                inbound_account = 'Expenses:UK:Unknown'
+                inbound_account = BALANCE_GAP_PLUG_ACCOUNT
                 inbound_units = abs(gap.gap_amount)
             else:
                 # Positive gap: CSV balance > calculated, need to ADD
                 inbound_account = gap.account
                 inbound_units = abs(gap.gap_amount)
-                outbound_account = 'Income:Other'
+                outbound_account = BALANCE_GAP_PLUG_ACCOUNT
                 outbound_units = abs(gap.gap_amount)
         else:
             # Missing transactions: Gap = actual - expected
@@ -249,13 +265,13 @@ def create_remediations(gaps: List[BalanceGap]) -> List[Envelope]:
                 # Negative gap: balance decreased, record as expense
                 outbound_account = gap.account
                 outbound_units = abs(gap.gap_amount)
-                inbound_account = 'Expenses:UK:Unknown'
+                inbound_account = BALANCE_GAP_PLUG_ACCOUNT
                 inbound_units = abs(gap.gap_amount)
             else:
                 # Positive gap: balance increased, record as income
                 inbound_account = gap.account
                 inbound_units = abs(gap.gap_amount)
-                outbound_account = 'Income:Other'
+                outbound_account = BALANCE_GAP_PLUG_ACCOUNT
                 outbound_units = abs(gap.gap_amount)
 
         # Date the remediation appropriately:

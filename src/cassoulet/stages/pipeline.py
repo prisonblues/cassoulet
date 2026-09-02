@@ -508,6 +508,19 @@ class Pipeline:
         # Store expense processor stats
         self.stats['expense_categorization'] = expense_processor.get_stats()
 
+        # REVERSALS AND REFUNDS: money coming back on the same account it left
+        # from. Must run AFTER categorisation, because the whole point is to
+        # inherit the account the ORIGINAL was booked to.
+        logger.info("\n↩️  Resolving reversals and refunds...")
+        from cassoulet.stages.reversal_refund_processor import ReversalRefundProcessor
+
+        reversal_processor = ReversalRefundProcessor()
+        canonical_envelopes, reversal_warnings = reversal_processor.process_envelopes(
+            canonical_envelopes
+        )
+        self.all_warnings.extend(reversal_warnings)
+        self.stats['reversal_refund'] = reversal_processor.get_stats()
+
         # CUSTOM PROCESSORS: Run user-provided processors (e.g. company accounting)
         for processor in self.config.custom_processors:
             processor_name = getattr(processor, 'processor_name', type(processor).__name__)
