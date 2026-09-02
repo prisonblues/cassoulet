@@ -1565,6 +1565,32 @@ def one_account_is_credit_card_one_is_broker(env1: Envelope, env2: Envelope) -> 
     return one_each(env1, env2, check_credit_card, check_broker)
 
 
+def one_account_is_credit_card_one_is_bank(env1: Envelope, env2: Envelope) -> bool:
+    """Check if one envelope is a credit card and the other is a bank.
+
+    This is the credit card BILL PAYMENT shape: money leaves a current account
+    and lands against the card, reducing the debt. It is a transfer between two
+    of your own accounts, not income and not an expense - the expense was
+    already recorded when each individual purchase hit the card.
+
+    Distinct from one_account_is_credit_card_one_is_broker, which is the invalid
+    pairing. This one is valid and common: monthly, for the statement balance.
+
+    On its own this only says the account TYPES are right. The scoring patterns
+    combine it with amount and date agreement, which is what makes it safe when
+    two withdrawals of the same amount fall on the same day and only one of them
+    is the card payment.
+    """
+    from cassoulet.utils.accounts import account_is_credit_card
+    def check_credit_card(env: Envelope) -> bool:
+        acc = get_primary_account(env)
+        return acc and account_is_credit_card(acc)
+    def check_bank(env: Envelope) -> bool:
+        acc = get_primary_account(env)
+        return acc and account_is_bank(acc)
+    return one_each(env1, env2, check_credit_card, check_bank)
+
+
 def accounts_same_institution(env1: Envelope, env2: Envelope) -> bool:
     """Check if both accounts are from the same institution."""
     acc1 = get_primary_account(env1)
@@ -1761,11 +1787,17 @@ def transfer_delay(env1: Envelope, env2: Envelope) -> Optional[int]:
     # Use the flow pattern to determine dates
     flow = compat.get('flow_pattern')
 
-    if flow == 'env1_sends_env2_receives':
+    # envelope_compatibility_checks names the same flow from either side:
+    # 'env1_sends_env2_receives' and 'env2_receives_env1_sends' describe one
+    # situation, and which name you get depends only on the argument order the
+    # scorer happened to use. Handling just one spelling made this function
+    # return None for half of all pairs, silently dropping the date signal -
+    # a same-day transfer scored 220 in one order and 350 in the other.
+    if flow in ('env1_sends_env2_receives', 'env2_receives_env1_sends'):
         # env1 sends, env2 receives
         outbound_date = env1.date
         inbound_date = env2.date
-    elif flow == 'env2_sends_env1_receives':
+    elif flow in ('env2_sends_env1_receives', 'env1_receives_env2_sends'):
         # env2 sends, env1 receives
         outbound_date = env2.date
         inbound_date = env1.date

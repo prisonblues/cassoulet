@@ -174,6 +174,27 @@ NO_MATCH_PATTERNS = {
         }
     },
     
+    # ORDER MATTERS: first match wins, so this sits ABOVE 'direct_debits'.
+    # A card bill is very often collected BY direct debit, so the card leg reads
+    # "DIRECT DEBIT PAYMENT - THANK YOU" and the rule below would mark it
+    # transfer-ineligible - killing the match before scoring ever sees it. Paying
+    # your own card IS a transfer between your own accounts; the expense was
+    # recorded when each purchase hit the card. Only inbound legs qualify:
+    # outbound from a liability is spending, which is_transfer_eligible already
+    # rejects.
+    'credit_card_bill_payment': {
+        'name': 'Credit Card Bill Payment',
+        'reason': 'Paying your own card is a transfer, even when collected by direct debit',
+        'patterns': [
+            {'envelope_type': 'inbound_only', 'narration': '*PAYMENT - THANK YOU*'},
+            {'envelope_type': 'inbound_only', 'narration': '*CARD PYMT*'},
+        ],
+        'metadata': {
+            'transfer-eligible': True,
+            'transaction-type-hint': 'TRANSFER'
+        }
+    },
+
     'direct_debits': {
         'name': 'Direct Debits',
         'reason': 'Regular bill payments, not transfers between your accounts',
