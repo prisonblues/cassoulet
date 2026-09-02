@@ -217,3 +217,99 @@ class TestOriginalConsumption:
         stats = self._run([first_buy, second_buy] + credits)
 
         assert stats["refunds_resolved"] == 2
+
+
+class TestReimbursementSuggestions:
+    """Amount-coincidence search for what an employer reimbursement covers.
+
+    Suggests and logs; never reclassifies. The guards below exist because
+    without them the search produced confident nonsense - spousal transfers
+    "covered by" school fees, and one dinner cited by every claim it fitted.
+    """
+
+    def _card(self, amount, when, eid, payee="MERCHANT", ccy="GBP"):
+        return Envelope(date=when, payee=payee, narration="",
+                        outbound_units=Decimal(amount), outbound_type=ccy,
+                        outbound_account=CARD, envelope_id=eid, source_type="csv")
+
+    def _claim(self, amount, when, eid, account="Assets:Receivables:SimmonsSimmonsLLP",
+               into=CHK):
+        e = Envelope(date=when, payee="SIMMONS & SIMMONS", narration="",
+                     inbound_units=Decimal(amount), inbound_type="GBP",
+                     inbound_account=into, envelope_id=eid, source_type="csv")
+        e.metadata["income_account"] = account
+        return e
+
+    def _suggest(self, envelopes):
+        p = ReversalRefundProcessor()
+        _, warnings = p.process_envelopes(envelopes)
+        return [w for w in warnings if "may cover" in w.message]
+
+    def test_single_expense_is_suggested(self):
+        claim = self._claim("100.91", date(2025, 9, 29), "c1")
+        exp = self._card("100.91", date(2025, 9, 18), "e1", "THE JUGGED HARE")
+        assert len(self._suggest([claim, exp])) == 1
+
+    def test_pair_is_suggested_when_unique(self):
+        claim = self._claim("566.53", date(2025, 8, 11), "c1")
+        a = self._card("55.78", date(2025, 7, 17), "e1")
+        b = self._card("510.75", date(2025, 7, 18), "e2")
+        s = self._suggest([claim, a, b])
+        assert len(s) == 1
+        assert set(s[0].details["suggested_expense_ids"]) == {"e1", "e2"}
+
+    def test_ambiguity_declines(self):
+        # Two ways to make the same total: say nothing rather than pick one.
+        claim = self._claim("100.00", date(2025, 9, 29), "c1")
+        exps = [self._card("100.00", date(2025, 9, 10), "e1"),
+                self._card("100.00", date(2025, 9, 11), "e2")]
+        assert self._suggest([claim] + exps) == []
+
+    def test_family_receivable_is_not_an_expense_claim(self):
+        # Spousal transfers also land in a receivable. Matching them produced
+        # GBP 4,000 "covered by" two GBP 2,000 school-fee payments.
+        claim = self._claim("4000.00", date(2025, 9, 29), "c1",
+                            account="Assets:Receivable:Family:Sara")
+        exp = self._card("4000.00", date(2025, 9, 10), "e1", "THE HARRODIAN SCHOOL")
+        assert self._suggest([claim, exp]) == []
+
+    def test_claim_must_arrive_in_a_bank_account(self):
+        # An employer pays a current account. Money landing on a card is a
+        # merchant refund, not a reimbursement.
+        claim = self._claim("100.91", date(2025, 9, 29), "c1", into=CARD)
+        exp = self._card("100.91", date(2025, 9, 18), "e1")
+        assert self._suggest([claim, exp]) == []
+
+    def test_currency_must_match(self):
+        claim = self._claim("100.91", date(2025, 9, 29), "c1")
+        exp = self._card("100.91", date(2025, 9, 18), "e1", ccy="USD")
+        assert self._suggest([claim, exp]) == []
+
+    def test_expense_outside_the_window_is_ignored(self):
+        claim = self._claim("100.91", date(2025, 9, 29), "c1")
+        exp = self._card("100.91", date(2025, 6, 1), "e1")   # ~120 days earlier
+        assert self._suggest([claim, exp]) == []
+
+    def test_one_expense_cannot_serve_two_claims(self):
+        # Repeated equal reimbursements would otherwise all cite one dinner.
+        c1 = self._claim("100.91", date(2025, 9, 29), "c1")
+        c2 = self._claim("100.91", date(2025, 9, 30), "c2")
+        exp = self._card("100.91", date(2025, 9, 18), "e1")
+        assert len(self._suggest([c1, c2, exp])) == 1
+
+    def test_a_refunded_expense_is_not_claimable(self):
+        # Money you got back is not money you can claim.
+        claim = self._claim("100.91", date(2025, 9, 29), "c1")
+        exp = self._card("100.91", date(2025, 9, 18), "e1", "SOME RESTAURANT")
+        refund = Envelope(date=date(2025, 9, 20), payee="SOME RESTAURANT", narration="",
+                          inbound_units=Decimal("100.91"), inbound_type="GBP",
+                          inbound_account=CARD, envelope_id="r1", source_type="csv")
+        refund.metadata["reverses_envelope_id"] = "e1"
+        assert self._suggest([claim, exp, refund]) == []
+
+    def test_nothing_is_reclassified(self):
+        claim = self._claim("100.91", date(2025, 9, 29), "c1")
+        exp = self._card("100.91", date(2025, 9, 18), "e1")
+        before = dict(claim.metadata)
+        self._suggest([claim, exp])
+        assert claim.metadata == before, "suggestions must not mutate the claim"

@@ -726,11 +726,59 @@ class Pipeline:
         self._wait_for_writes()
         self._write_pool.shutdown(wait=False)
 
+        # HEALTH SUMMARY - the machine-readable answer to "did this actually
+        # work". Callers previously had no way to ask: PipelineResult.warnings
+        # was never populated, so a processor could die, the run could report
+        # success, and a materially wrong ledger got written with nobody the
+        # wiser. A CRITICAL here means a whole stage failed and returned its
+        # input unchanged - not a degraded ledger, a wrong one.
+        severity_counts: Dict[str, int] = {}
+        failed_processors = []
+        for w in self.all_warnings:
+            severity = getattr(w, 'severity', None)
+            if not severity:
+                continue
+            severity_counts[severity] = severity_counts.get(severity, 0) + 1
+            if severity == 'CRITICAL':
+                name = getattr(w, 'processor_name', 'unknown')
+                message = getattr(w, 'message', '')
+                # EVERY critical trips the alarm. An exception means the stage
+                # died and returned its input untouched; the Steel Thread
+                # envelope-count violations are less understood but are flagged
+                # CRITICAL by a system whose stated guarantee is zero silent
+                # failures, so they get the same treatment until someone either
+                # fixes them or argues the severity down. Five of them fired on
+                # every run of the reference ledger and nobody had ever seen
+                # one, which is exactly how a sixth that matters gets missed.
+                died = message.startswith('Processor failed with exception')
+                failed_processors.append({
+                    'processor': name,
+                    'message': message,
+                    'kind': 'died' if died else 'contract',
+                })
+
+        self.stats['health'] = {
+            'critical': severity_counts.get('CRITICAL', 0),
+            'errors': severity_counts.get('ERROR', 0),
+            'warnings': severity_counts.get('WARNING', 0),
+            'failed_processors': failed_processors,
+            'healthy': not failed_processors,
+        }
+        if failed_processors:
+            logger.critical(
+                "PIPELINE DEGRADED - %d critical failure(s). Any stage that DIED "
+                "returned its input unchanged, making the written ledger wrong "
+                "rather than merely incomplete: %s",
+                len(failed_processors),
+                "; ".join(f"{f['processor']}: {f['message']}" for f in failed_processors),
+            )
+
         return PipelineResult(
             envelopes=final_envelopes,  # Use final_envelopes, not enhanced_envelopes
             canonical_transactions=final_transactions,
             statistics=self.stats,
-            reconciliation_report=reconciliation_report
+            reconciliation_report=reconciliation_report,
+            warnings=[str(getattr(w, 'message', w)) for w in self.all_warnings],
         )
     
     def _clean_output_directory(self) -> None:

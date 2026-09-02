@@ -29,6 +29,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from cassoulet.stages.envelope import Envelope
 from cassoulet.stages.envelope_processor import EnvelopeProcessor
 from cassoulet.base.exceptions import ProcessingWarning
+from cassoulet.utils.accounts import account_is_bank, account_is_credit_card
 from cassoulet.utils.envelope_utilities import (
     _counterparty,
     get_absolute_amount,
@@ -49,6 +50,72 @@ logger = logging.getLogger(__name__)
 REVERSAL_MAX_DAYS = 7
 REFUND_MAX_DAYS = 120
 
+# Employer expense-reimbursement suggestions.
+#
+# A reimbursement is a batch payment from an employer covering expenses paid
+# personally weeks earlier. Nothing in the bank data links the two - no claim
+# reference, no line items - so this searches for the combination of prior card
+# spending that sums to the payment.
+#
+# THE NUMBERS BELOW ARE IN-SAMPLE. The window and item cap were CHOSEN using
+# the same 200 controls the rate is then quoted from, which makes 4.5% a
+# selection-biased fit rather than a validated rate. With 9 positives in 200 the
+# confidence interval alone spans roughly 2-8%. Treat them as "this ballpark",
+# not as a measured error rate.
+#
+# The controls are also uniform-random amounts, which is the wrong null: real
+# amounts cluster on round pounds, .00, .50, .99 and restaurant totals, and
+# clustering raises collision rates. Proper validation needs real non-claim
+# inbound payments, held out by time and payer. Not done.
+#
+# Against three known claims and 200 random control amounts:
+#
+#   window   real found   false positives
+#     40d       3/3            3.0%
+#     60d       3/3            4.5%
+#     70d       3/3            7.0%
+#   max 3 items instead of 2, at 90d:            21%
+#
+# Flat between 40 and 60 days, degrading past 70. 60 is chosen over 40 for
+# headroom: the observed gaps are 11, 24 and 40 days, so 40 only just clears
+# the longest one and would fail silently if the employer batched a week later.
+#
+# UNIQUENESS AT MINIMUM CARDINALITY is the actual test. Counting subsets across
+# all sizes destroys the signal - one claim has 32 subsets in total but exactly
+# one at size 1. Prefer the fewest items, and require that answer to be alone.
+#
+# UNIQUENESS IS NOT AUTHENTICATION. With ~250 candidates there are ~31,000
+# pairs; spread over the plausible range of penny values that is well under one
+# expected accidental hit, so "exactly one hit" happens by chance a fair share
+# of the time. Uniqueness means no SECOND coincidence existed in a sparse,
+# truncated pool - not that this pair caused the payment. Shrinking the window
+# can perversely convert ambiguity into apparent confidence.
+#
+# SENSITIVITY IS UNKNOWN. Three for three sets a 95% lower bound near 29%, from
+# one payer in one six-month window. Known blind spots, all silent: claims of
+# three or more items, payment more than 60 days after spending, split or
+# partial or net-of-advance claims, expenses paid from a bank account or another
+# card, and any employer not in the allow-list below.
+#
+# SUGGESTION ONLY, and it must stay that way. This is an amount coincidence,
+# not evidence of business purpose. It must never feed automatic postings, a
+# deductible-expense total, or a tax figure.
+REIMBURSEMENT_WINDOW_DAYS = 60
+REIMBURSEMENT_MAX_ITEMS = 2
+
+# WHICH receivable accounts represent an employer settling an expense claim.
+# Named explicitly rather than matched by prefix: "Assets:Receivable" also
+# catches Assets:Receivable:Family:Sara, and treating spousal transfers as
+# expense claims produced confident nonsense - GBP 4,000 "covered by" two
+# GBP 2,000 school-fee payments, GBP 1,000 by a family ski holiday.
+#
+# A claim must also arrive in a BANK account. An employer pays into a current
+# account, not onto a credit card, and money appearing on the card is a refund
+# from a merchant rather than a reimbursement from anyone.
+EXPENSE_CLAIM_RECEIVABLE_ACCOUNTS = (
+    'Assets:Receivables:SimmonsSimmonsLLP',
+)
+
 
 class ReversalRefundProcessor(EnvelopeProcessor):
     """Point reversals and refunds at the account their original was booked to."""
@@ -62,6 +129,7 @@ class ReversalRefundProcessor(EnvelopeProcessor):
             'reversals_resolved': 0,
             'refunds_resolved': 0,
             'unresolved': 0,
+            'reimbursements_suggested': 0,
         }
 
     def _process_internal(
@@ -167,7 +235,127 @@ class ReversalRefundProcessor(EnvelopeProcessor):
             self.stats['refunds_resolved'],
             self.stats['unresolved'],
         )
+        warnings.extend(self._suggest_reimbursement_claims(envelopes))
         return envelopes, warnings
+
+    def _suggest_reimbursement_claims(
+        self, envelopes: List[Envelope]
+    ) -> List[ProcessingWarning]:
+        """Suggest which card spending a reimbursement is likely to cover.
+
+        Emits warnings and changes nothing. See the module constants for why
+        this suggests rather than posts.
+        """
+        from itertools import combinations
+
+        claims = [
+            e for e in envelopes
+            if has_inbound_units(e) and not has_outbound_units(e)
+            and str(e.metadata.get('income_account', '')) in EXPENSE_CLAIM_RECEIVABLE_ACCOUNTS
+            and e.inbound_account and account_is_bank(e.inbound_account)
+        ]
+        if not claims:
+            return []
+
+        # Card spending only. Expenses go on the card; bank debits are bills and
+        # transfers, and including them enlarges the pool without adding signal.
+        spend = []
+        for e in envelopes:
+            account = e.outbound_account
+            if (has_outbound_units(e) and account and account_is_credit_card(account)
+                    and e.date and e.outbound_units):
+                spend.append(e)
+
+        # An expense can only be reimbursed once. Without this the same dinner
+        # is cited by every claim it happens to fit, which is how repeated
+        # equal reimbursements end up all pointing at one meal.
+        used_expense_ids: set = set()
+
+        # Money you got back is not money you can claim. This stage has just
+        # resolved reversals and refunds, so the originals they cancel are known
+        # - drop them from the pool rather than offering a refunded dinner as
+        # the explanation for a reimbursement.
+        cancelled_expense_ids = {
+            e.metadata['reverses_envelope_id'] for e in envelopes
+            if e.metadata.get('reverses_envelope_id')
+        }
+
+        found: List[ProcessingWarning] = []
+        for claim in claims:
+            target = get_absolute_amount(claim)
+            if target is None or not claim.date:
+                continue
+            # Same currency, unused, and inside the window. Currency is checked
+            # because nothing else does: every card posting is GBP today, but a
+            # foreign-currency card would otherwise let a GBP claim "exactly"
+            # match a USD total.
+            claim_ccy = claim.inbound_type
+            pool = [s for s in spend
+                    if 0 < (claim.date - s.date).days <= REIMBURSEMENT_WINDOW_DAYS
+                    and s.outbound_type == claim_ccy
+                    and s.envelope_id not in used_expense_ids
+                    and s.envelope_id not in cancelled_expense_ids]
+
+            match = None
+            for size in range(1, REIMBURSEMENT_MAX_ITEMS + 1):
+                hits = []
+                for c in combinations(pool, size):
+                    if sum(x.outbound_units for x in c) == target:
+                        hits.append(c)
+                        if len(hits) > 1:
+                            break  # ambiguous; no need to enumerate the rest
+                if len(hits) == 1:
+                    match = hits[0]
+                    break
+                if hits:
+                    break  # ambiguous at this size: decline rather than guess
+            if not match:
+                continue
+
+            used_expense_ids.update(x.envelope_id for x in match)
+            self.stats['reimbursements_suggested'] += 1
+            found.append(ProcessingWarning(
+                processor_name=self.processor_name,
+                severity='INFO',
+                message=(
+                    f"AMOUNT COINCIDENCE (not evidence) - reimbursement of {target} "
+                    f"may cover: "
+                    + ", ".join(f"{x.outbound_units} {x.payee or x.narration}" for x in match)
+                ),
+                source_transaction=None,
+                details={
+                    'envelope_id': claim.envelope_id,
+                    'claim_date': str(claim.date),
+                    'amount': str(target),
+                    'suggested_expense_ids': [x.envelope_id for x in match],
+                    'suggested_expenses': [
+                        {'date': str(x.date), 'amount': str(x.outbound_units),
+                         'description': x.payee or x.narration}
+                        for x in match
+                    ],
+                    'basis': (
+                        f'unique at {len(match)} item(s) within '
+                        f'{REIMBURSEMENT_WINDOW_DAYS} days; suggestion only'
+                    ),
+                },
+            ))
+        # Logged individually, not just counted. ProcessingWarnings at INFO
+        # reach NO output in this pipeline - the forensic report renders only
+        # CRITICAL and validation errors, so 22,000 INFO warnings a run are
+        # computed and discarded. A suggestion nobody can read is not a
+        # suggestion. These go to the main log so they can be grepped:
+        #   grep "may cover" logs/<timestamp>/importer_<timestamp>.log
+        for w in found:
+            logger.info("  %s [%s]", w.message, w.details.get('basis', ''))
+        if found:
+            logger.info(
+                "  Reimbursement claims suggested: %d - SUGGESTIONS ONLY, nothing "
+                "reclassified, no tax figure affected. Each is an amount "
+                "coincidence needing confirmation against the actual claim. "
+                "Review with: grep 'AMOUNT COINCIDENCE' logs/<timestamp>/importer_*.log",
+                len(found)
+            )
+        return found
 
     def _kind(self, env: Envelope) -> Optional[str]:
         """'reversal', 'refund', or None for the returning leg of a pair.
