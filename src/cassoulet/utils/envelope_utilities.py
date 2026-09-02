@@ -8,6 +8,7 @@ Also includes EnvelopeBuilder for creating envelopes from various sources.
 """
 
 import logging
+import re
 import sys
 from typing import Optional, Dict, Any, Set, List, Union, Tuple
 from decimal import Decimal
@@ -1589,6 +1590,108 @@ def one_account_is_credit_card_one_is_bank(env1: Envelope, env2: Envelope) -> bo
         acc = get_primary_account(env)
         return acc and account_is_bank(acc)
     return one_each(env1, env2, check_credit_card, check_bank)
+
+
+def _reversal_marker(envelope: Envelope):
+    """Parse a bank reversal marker, or None if this is not a reversal.
+
+    Banks announce a reversal in the payee and name what it reverses in the
+    narration:
+
+        VIRGIN MONEY,      <blank>,      WITHD, 324.22
+        REVERSAL OF 24-11, VIRGIN MONEY, DEP,   324.22
+
+    Returns (day, month, original_payee) so a candidate original can be checked
+    against both the date the bank quotes and the payee it names.
+    """
+    m = re.match(r'\s*REVERSAL OF\s+(\d{1,2})-(\d{1,2})\s*$', envelope.payee or '',
+                 re.IGNORECASE)
+    if not m:
+        return None
+    return int(m.group(1)), int(m.group(2)), (envelope.narration or '').strip().upper()
+
+
+def is_reversal_of(env1: Envelope, env2: Envelope) -> bool:
+    """True if one envelope is a bank reversal of the other.
+
+    A reversal is not income and not a refund - the bank undid a payment that
+    should never have left. Left unmatched both legs fall out separately, and
+    the balance the reversal restores also makes the gap detector fabricate a
+    remediation entry for the same amount, so one reversal can produce two
+    phantom income postings.
+
+    Four independent signals must agree: same account, equal amount, opposite
+    direction, and the reversal naming the original's payee. The quoted date is
+    checked by the scoring pattern rather than here, because banks sometimes
+    post the pair a day apart.
+    """
+    for reversal, original in ((env1, env2), (env2, env1)):
+        marker = _reversal_marker(reversal)
+        if not marker:
+            continue
+        if _reversal_marker(original):
+            continue  # two reversals are not a pair
+        _, _, named_payee = marker
+        if not named_payee:
+            continue
+        if (original.payee or '').strip().upper() != named_payee:
+            continue
+        if get_primary_account(reversal) != get_primary_account(original):
+            continue
+        rev_amt = get_absolute_amount(reversal)
+        orig_amt = get_absolute_amount(original)
+        if rev_amt is None or orig_amt is None or rev_amt != orig_amt:
+            continue
+        return _opposite_direction(reversal, original)
+    return False
+
+
+def _counterparty(envelope: Envelope) -> str:
+    """Who the other side of this transaction was, however the bank spelled it.
+
+    Card statements often carry the merchant in the narration and leave the
+    payee empty, while current accounts populate the payee. Matching on payee
+    alone silently skipped every credit card refund.
+    """
+    return ((envelope.payee or '').strip() or (envelope.narration or '').strip()).upper()
+
+
+def is_refund_of(env1: Envelope, env2: Envelope) -> bool:
+    """True if one envelope is a merchant refund of the other.
+
+    Weaker than a reversal: the payee agrees and the direction is opposite, but
+    a refund can arrive months later and can be partial, so this asserts only
+    the shape. The scoring pattern supplies the date window, and a refund
+    settles against whatever account the original purchase was booked to.
+    """
+    for refund, original in ((env1, env2), (env2, env1)):
+        # Roles are NOT interchangeable. The refund is the leg where money comes
+        # back and the original the leg where it went out; trying both ways
+        # round without this makes an over-refund look like a valid partial one,
+        # because 50 <= 100 reads fine once the roles are swapped.
+        if not has_inbound_units(refund) or not has_outbound_units(original):
+            continue
+        counterparty = _counterparty(refund)
+        if not counterparty or counterparty != _counterparty(original):
+            continue
+        if _reversal_marker(refund) or _reversal_marker(original):
+            continue  # reversals are handled by their own, stronger rule
+        if get_primary_account(refund) != get_primary_account(original):
+            continue
+        # A refund never exceeds what was paid. Equal is the common case: a
+        # single order returned in full.
+        refunded = get_absolute_amount(refund)
+        paid = get_absolute_amount(original)
+        if refunded is None or paid is None or refunded > paid:
+            continue
+        return True
+    return False
+
+
+def _opposite_direction(env1: Envelope, env2: Envelope) -> bool:
+    """True if one envelope receives where the other sends."""
+    return ((has_inbound_units(env1) and has_outbound_units(env2))
+            or (has_outbound_units(env1) and has_inbound_units(env2)))
 
 
 def accounts_same_institution(env1: Envelope, env2: Envelope) -> bool:
