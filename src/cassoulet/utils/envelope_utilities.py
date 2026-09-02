@@ -941,11 +941,111 @@ def is_transfer_eligible(envelope: Envelope) -> bool:
     # Skip liability account spending (credit cards, loans, mortgages)
     # Outbound from a liability = expense/spending, not a transfer
     # Payments TO a liability (inbound) are still transfer-eligible
+    #
+    # An outbound that merely UNDOES an earlier payment is not spending, and is
+    # marked eligible before scoring by mark_undone_liability_payments(). That
+    # mark arrives through the explicit metadata flag checked at the top of this
+    # function.
     if envelope.outbound_account and account_is_liability(envelope.outbound_account):
         return False
 
     # Default to eligible
     return True
+
+
+# A bounced payment posts AFTER the payment it undoes, and the gap absorbs
+# weekends and processing delays. Two days catches the three real cases in the
+# reference ledger (1 and 2 days apart); one day misses GBP 3,182.21.
+UNDONE_PAYMENT_MIN_DAYS = 1
+UNDONE_PAYMENT_MAX_DAYS = 2
+
+
+def mark_undone_liability_payments(envelopes: List[Envelope]) -> int:
+    """Mark liability outflows that merely undo an earlier payment.
+
+    When a payment to a credit card bounces, the card records the debt going
+    back up. Under the normalised convention that is an OUTBOUND movement, and
+    is_transfer_eligible() reads outbound-from-a-liability as spending and
+    refuses to score it. The bank side of the same failure is a plain inbound
+    credit and IS eligible, so the two halves of one bounced payment could never
+    reach each other despite scoring 220 against a threshold of 70. Each left
+    phantom income on the bank and a phantom expense on the card.
+
+    THE TEST IS STRUCTURAL. An outflow from a liability, of exactly the amount
+    of an earlier inflow on the same account in the same currency, posting one
+    or two days later, with no other candidate. Nothing reads the narration: an
+    earlier version keyed on the word "REVERSAL", which is one bank's
+    vocabulary - UNPAID, RETURNED and CANCELLED mean the same and match none of
+    it, and an "UNPAID DIRECT DEBIT PAYMENT" of GBP 3,182.21 in this very ledger
+    was missed because of it.
+
+    EVERY CONDITION IS LOAD-BEARING, and each was added because its absence
+    produced a wrong answer:
+
+      Strictly LATER, never the same day. A genuine bounce is processed after
+      the payment. Same-day pairs are corrections or coincidences, and a date
+      carries no posting sequence so their order cannot even be established.
+      Without this, a GBP 500 card payment was "undone" by a GBP 500 car
+      service bought the same day.
+
+      One-to-one. An inflow is consumed by the outflow that claims it. Without
+      this, one GBP 500 payment could authorise every GBP 500 purchase that
+      week - the mark says nothing was bought, so applying it to several
+      purchases suppresses real spending.
+
+      Unambiguous. More than one candidate inflow means decline, not guess.
+      Recurring equal charges are common on a card; a Milk & More subscription
+      produces exactly this shape twice in three days.
+
+      Same currency. Comparing bare numbers across commodities would equate
+      unlike quantities.
+
+    Extremely narrow by design: 3 marks across 6,316 liability outflows in the
+    reference ledger, and 1 declined as ambiguous.
+
+    Returns the number of envelopes marked.
+    """
+    from collections import defaultdict
+
+    # Index inflows by (account, currency, amount) so the search is a lookup
+    # rather than a scan of every inflow for every outflow.
+    inflow_index: Dict[tuple, List[Envelope]] = defaultdict(list)
+    outflows: List[Envelope] = []
+    for env in envelopes:
+        if not env.date:
+            continue
+        if (has_inbound_units(env) and env.inbound_units and env.inbound_account
+                and account_is_liability(env.inbound_account)):
+            inflow_index[(env.inbound_account, env.inbound_type,
+                          env.inbound_units)].append(env)
+        elif (has_outbound_units(env) and env.outbound_units and env.outbound_account
+                and account_is_liability(env.outbound_account)):
+            outflows.append(env)
+
+    consumed: set = set()
+    marked = 0
+    # Oldest first, so when two outflows could claim one inflow the earlier -
+    # and so more plausible - reversal wins rather than whichever came first in
+    # the input.
+    for env in sorted(outflows, key=lambda e: e.date):
+        if env.metadata.get('is_transfer_eligible') is not None:
+            continue
+        key = (env.outbound_account, env.outbound_type, env.outbound_units)
+        candidates = [
+            inflow for inflow in inflow_index.get(key, ())
+            if id(inflow) not in consumed
+            and UNDONE_PAYMENT_MIN_DAYS
+            <= (env.date - inflow.date).days
+            <= UNDONE_PAYMENT_MAX_DAYS
+        ]
+        if len(candidates) != 1:
+            continue  # none, or ambiguous: decline rather than guess
+        inflow = candidates[0]
+        consumed.add(id(inflow))
+        env.metadata['is_transfer_eligible'] = True
+        env.metadata['undoes_payment_of'] = str(inflow.envelope_id)
+        marked += 1
+    return marked
 
 
 def is_manual_envelope(envelope: Envelope) -> bool:
