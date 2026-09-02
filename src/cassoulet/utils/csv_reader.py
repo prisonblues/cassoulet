@@ -21,7 +21,7 @@ from typing import Dict, List, Optional, Any, Type, NamedTuple
 from decimal import Decimal
 from datetime import date
 from cassoulet.utils.csv_row_data import CSVRowData
-from cassoulet.utils.csv_utils import detect_semantic_field
+from cassoulet.utils.csv_utils import detect_semantic_field, _squash
 from cassoulet.utils.dates import parse_date_strict, detect_date_format
 from cassoulet.utils.cleaner import clean_string, parse_amount, EMPTY_VALUES
 from cassoulet.base.exceptions import CSVNoHeadersError, CSVDataIntegrityError
@@ -326,6 +326,19 @@ class CSVReader:
             
             # Store in semantic map
             if semantic_type:
+                # Two columns claiming one meaning is a data-loss bug, not a
+                # preference: the later column wins and the earlier one is
+                # discarded with no trace. Monzo's 'Name' was configured as the
+                # narrative and then overwritten by 'Description', which silently
+                # threw away every counterparty in the file.
+                previous = self.semantic_map.get(semantic_type)
+                if previous is not None and previous.column_name != header:
+                    logger.warning(
+                        "Columns '%s' and '%s' both map to '%s'; '%s' wins and "
+                        "'%s' is discarded. Map one of them explicitly.",
+                        previous.column_name, header, semantic_type,
+                        header, previous.column_name,
+                    )
                 self.semantic_map[semantic_type] = mapping
 
         # Post-processing: For investment transactions, ensure commodity_raw is populated
@@ -356,6 +369,48 @@ class CSVReader:
             self.column_mappings.append(commodity_mapping)
             self.semantic_map['commodity_raw'] = commodity_mapping
             # Note: We keep 'narrative' mapping too, so both fields get populated from same column
+
+        self._adopt_name_column_as_payee()
+
+    def _adopt_name_column_as_payee(self):
+        """Use a bare 'Name' column as the payee when nothing better exists.
+
+        Monzo names the counterparty column 'Name' and puts the bank's own
+        reference in 'Description'. With no payee detected the importer kept the
+        reference and discarded the name, so GBP 82,620 of payments to a column
+        that plainly said "Coinbase" were stored as "CBAGBPXQFYSTGW" and could
+        be neither categorised nor matched to anything.
+
+        'Name' is NOT in HEADER_PATTERNS because it is too weak to trust on its
+        own: detection is substring-based for patterns over three characters, so
+        it would also swallow 'Account Name' and 'Holder Name'. It is only safe
+        here, where the whole header set is visible and two things can be
+        checked - that no real payee column was found, and that this is not a
+        holdings file, where 'Name' is the security name rather than a
+        counterparty (one such file in the reference data is
+        'Symbol,Name,Qty,Price,...').
+        """
+        if 'payee' in self.semantic_map:
+            return
+        if 'quantity' in self.semantic_map or 'price' in self.semantic_map:
+            return  # holdings/positions file - 'Name' is the instrument
+        for mapping in self.column_mappings:
+            if mapping.semantic_type is not None:
+                continue
+            if _squash(mapping.column_name) != 'name':
+                continue
+            payee_mapping = ColumnMapping(
+                column_index=mapping.column_index,
+                column_name=mapping.column_name,
+                semantic_type='payee',
+                data_type=str,
+                cleaning_hints={},
+            )
+            self.column_mappings.append(payee_mapping)
+            self.semantic_map['payee'] = payee_mapping
+            logger.debug("No payee column detected; adopting '%s' as payee",
+                         mapping.column_name)
+            return
 
     def _detect_date_format(self, sample_rows: List[List[str]]):
         """
