@@ -18,6 +18,7 @@ Standalone utility functions (use these directly):
 """
 
 import re
+from functools import lru_cache
 from decimal import Decimal, InvalidOperation
 from typing import Dict, List, Optional, Any, Pattern as RePattern, Union, Tuple
 
@@ -109,20 +110,73 @@ def match_wildcard(text: str, pattern: str) -> bool:
         return bool(data.match(text_upper))
 
 
+@lru_cache(maxsize=512)
+def _word_start_pattern(keyword: str):
+    """Compiled matcher for a keyword appearing at the START of a word.
+
+    Returns None for a keyword that must never match. An EMPTY keyword is the
+    dangerous case: re.escape("") leaves a bare lookbehind, which matches at
+    position zero of every non-empty string. One blank entry in a config list
+    would therefore make its rule universal and silently swallow whatever
+    reached it first - the categorisation equivalent of a wildcard nobody wrote.
+    """
+    key = keyword.upper()
+    if not key.strip():
+        return None
+    # (?<!\w) rather than (?<![A-Z0-9]): \w is Unicode-aware, so an accented or
+    # non-Latin letter is treated as part of a word rather than as a separator.
+    # With the ASCII class, "CAFEEON" spelled with an accent would have let 'EON'
+    # begin mid-word again, and "FOO_ESSO" would have matched 'ESSO'.
+    return re.compile(r'(?<!\w)' + re.escape(key))
+
+
 def text_contains_any(text: str, keywords: List[str]) -> bool:
-    """Check if text contains any of the keywords (case-insensitive).
+    r"""Check whether any keyword begins a word in text (case-insensitive).
 
-    Args:
-        text: Text to search in
-        keywords: List of keywords to search for
+    WORD START, not bare substring. A keyword may run on into the rest of the
+    word - "AMZN" still matches "AMZNMKTPLACE" - but it may not begin midway
+    through one.
 
-    Returns:
-        True if any keyword found in text
+    Plain substring matching was quietly miscategorising thousands of pounds,
+    because these keywords are short brand names and short brand names hide
+    inside ordinary words:
+
+        'ESSO'  matched  "MontESSOri"     GBP 26,004 of nursery fees as petrol
+        'BP '   matched  "VISION DIRECT GBP BRISTOL"
+        'SSE'   matched  "RuSSEll Square"
+        'EON'   matched  "LEON Cheapside"          a restaurant, as an energy bill
+        'AWS'   matched  "LAWSon Kitanoh"
+        'VUE'   matched  "BelleVUE Bicycles"
+        'SKY'   matched  "whiSKYexchange"
+        'EE '   matched  "instalment FEE ", "ad frEE for", "gumtrEE table"
+
+    Roughly 400 postings and GBP 40,000 across a dozen accounts, all invisible:
+    every one produced a confident, specific, wrong category.
+
+    The cost of the fix is compound merchant strings where the brand does not
+    start the word - "HailoCab" no longer matches 'CAB'. That is the right
+    trade: such cases are rare, and they are fixed by naming the merchant,
+    whereas substring collisions are silent and unbounded.
+
+    LIMITS, so nobody assumes more than this gives:
+      - Word START, not whole word. 'PRET' still matches "PRETTY", 'SKY' still
+        matches "SKYLINE". Keywords that are also common word-beginnings stay
+        risky, and the remaining exposure depends on vocabulary luck.
+      - The boundary is Python's Unicode-aware \w, so letters, digits and the
+        underscore all count as word characters.
+      - Trailing spaces are literal. 'BP ' needs an ASCII space after it and so
+        misses "BP" at end of text, "BP-", "BP/1234".
+    Per-keyword matching modes would settle all three; a single global policy
+    cannot.
     """
     if not text:
         return False
     text_upper = text.upper()
-    return any(str(kw).upper() in text_upper for kw in keywords)
+    for kw in keywords:
+        pattern = _word_start_pattern(str(kw))
+        if pattern is not None and pattern.search(text_upper):
+            return True
+    return False
 
 
 def parse_amount_condition(condition: str) -> Tuple[str, Optional[Decimal], Optional[Decimal]]:

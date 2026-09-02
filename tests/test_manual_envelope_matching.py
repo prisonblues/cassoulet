@@ -119,3 +119,82 @@ class TestScopeIsNotWidened:
             envelope_id="csv_elsewhere", source_type="csv",
         )
         assert not can_reconcile(_card_purchase_manual(), elsewhere)
+
+
+class TestTextContainsWordBoundary:
+    """text_contains matches at a WORD START, not anywhere in the string.
+
+    These keywords are short brand names, and short brand names hide inside
+    ordinary words. Plain substring matching miscategorised roughly 400
+    postings and GBP 40,000 - every one a confident, specific, wrong answer.
+    """
+
+    def _t(self, text, keywords):
+        from cassoulet.utils.pattern_matcher import text_contains_any
+        return text_contains_any(text, keywords)
+
+    def test_brand_inside_a_word_does_not_match(self):
+        # The expensive one: GBP 26,004 of nursery fees booked as petrol.
+        assert not self._t("THE MONTESSORI SCHOOL", ["ESSO"])
+        assert not self._t("BARNES MONTESSORI NURSERY", ["ESSO"])
+
+    def test_currency_code_is_not_a_petrol_station(self):
+        assert not self._t("VISION DIRECT GBP BRISTOL", ["BP "])
+        assert not self._t("TV LICENCE MBP FIRST PAYMENT", ["BP "])
+
+    def test_place_names_are_not_energy_suppliers(self):
+        assert not self._t("CASH TRLX RUSSELL SQUARE", ["SSE"])
+        assert not self._t("LEON CHEAPSIDE", ["EON"])
+        assert not self._t("BEDFORD STREET NEW YORK", ["EDF"])
+
+    def test_other_known_collisions(self):
+        assert not self._t("LAWSON KITANOH", ["AWS"])
+        assert not self._t("SUMUP *BELLEVUE BICYC", ["VUE"])
+        assert not self._t("THEWHISKYEXCHANGE LONDON", ["SKY"])
+        assert not self._t("INSTALMENT FEE PLAN", ["EE "])
+        assert not self._t("GUMTREE TABLE", ["EE "])
+
+    def test_genuine_merchants_still_match(self):
+        assert self._t("ESSO PETROL STATION", ["ESSO"])
+        assert self._t("BP WANDSWORTH S/SERVE", ["BP "])
+        assert self._t("SSE ENERGY", ["SSE"])
+        assert self._t("VUE CINEMAS WESTFIELD", ["VUE"])
+        assert self._t("AWS EMEA AWS.AMAZON.CO", ["AWS"])
+        assert self._t("TFL.GOV.UK/CP TFL TRAVEL", ["TFL"])
+
+    def test_a_keyword_may_run_on_into_the_word(self):
+        # Word START, not whole word: compound merchant strings still match.
+        assert self._t("AMZNMKTPLACE AMAZON.CO", ["AMZN"])
+        assert self._t("PRET A MANGER CHEAPSIDE", ["PRET"])
+
+    def test_the_accepted_cost_of_the_fix(self):
+        # A brand buried mid-word is now missed. Rare, and fixed by naming the
+        # merchant - unlike substring collisions, which are silent.
+        assert not self._t("HAILOCAB LONDON", ["CAB"])
+
+    def test_an_empty_keyword_never_matches(self):
+        # re.escape("") leaves a bare lookbehind, which matches position zero of
+        # every string. One blank entry in a config list would make its rule
+        # universal and silently swallow whatever reached it first.
+        assert not self._t("ANY RANDOM TEXT", [""])
+        assert not self._t("ANY RANDOM TEXT", ["   "])
+        # ...but it must not poison the rest of the list.
+        assert self._t("ESSO PETROL", ["", "ESSO"])
+
+    def test_keyword_case_is_canonicalised(self):
+        assert self._t("ESSO PETROL", ["esso"])
+        assert self._t("ESSO PETROL", ["Esso"])
+
+    def test_regex_metacharacters_are_literal(self):
+        assert self._t("SUMUP *BELLEVUE", ["*BELLEVUE"])
+        assert not self._t("SUMUP XBELLEVUE", ["*BELLEVUE"])
+
+    def test_boundary_is_unicode_aware(self):
+        # ASCII [A-Z0-9] treated an accented letter as a separator, which let a
+        # keyword begin mid-word again.
+        assert not self._t("CAFÉEON BAR", ["EON"])
+        assert not self._t("FOO_ESSO", ["ESSO"])
+
+    def test_pattern_cache_is_bounded(self):
+        from cassoulet.utils.pattern_matcher import _word_start_pattern
+        assert _word_start_pattern.cache_info().maxsize is not None
