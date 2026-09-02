@@ -21,6 +21,7 @@ import logging
 from cassoulet.utils.currencies import is_currency, is_commodity
 from cassoulet.utils.csv_row_data import CSVRowData
 from cassoulet.utils.deterministic_id import generate_id
+from cassoulet.utils.accounts import account_is_liability
 from cassoulet.utils.envelope_utilities import create_envelope
 from cassoulet.stages import Envelope, EnvelopeState
 
@@ -97,6 +98,32 @@ class EnvelopeBuilder:
         # Determine inbound/outbound based on sign convention
         outbound_units = None
         inbound_units = None
+
+        # A liability statement is written from the creditor's side: a charge
+        # INCREASES what you owe and is printed positive, a payment reduces it
+        # and is printed negative. Beancount is the mirror of that - you owe
+        # money, so the balance is negative, and a payment moves it toward zero.
+        # Reading a card or loan statement with the asset convention therefore
+        # inverts the whole account, which is not cosmetic:
+        #   - the balance shows +14,000.48 owed instead of -14,000.48
+        #   - every expense it feeds signs negative
+        #   - interest charged looks like interest earned
+        #   - is_transfer_eligible() sees a bill payment as outbound-from-
+        #     liability, reads it as spending, and drops it before scoring, so
+        #     card payments never match their bank leg
+        # Deciding this from the ACCOUNT rather than per importer means Amex,
+        # MBNA, loans and mortgages get it right on the day they are first
+        # imported, instead of each importer having to remember.
+        #
+        # Only the amount-sign conventions are flipped. 'debit_credit' and
+        # 'payment_receipt' name the direction in separate columns, and what
+        # those columns mean on a liability statement varies by provider, so
+        # those stay explicit configuration.
+        if account and account_is_liability(account):
+            sign_convention = {
+                'standard': 'reversed',
+                'reversed': 'standard',
+            }.get(sign_convention, sign_convention)
 
         if sign_convention == 'standard':
             # Standard: negative = outflow, positive = inflow

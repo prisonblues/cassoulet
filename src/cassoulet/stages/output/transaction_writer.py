@@ -1022,14 +1022,20 @@ class TransactionWriter(EnvelopeProcessor):
             elif 'fee' in narr_lower or 'charge' in narr_lower:
                 return 'Expenses:Fees'
 
-            # For liability accounts (credit cards, loans, mortgages),
-            # the semantics are inverted: positive = expense, negative = income/payment
+            # For liability accounts (credit cards, loans, mortgages), the
+            # direction reads the opposite way round to an asset account.
+            # EnvelopeBuilder now normalises liability statements to the
+            # Beancount convention - you owe money, so the balance is negative -
+            # which means debt INCREASING is an outbound posting, not inbound.
+            # This branch previously tested inbound and so sent every card
+            # purchase to Income:Other once the convention was corrected.
             if on_liability:
-                if envelope.inbound_units and envelope.inbound_units > 0:
+                if envelope.outbound_units and envelope.outbound_units > 0:
                     # Debt increasing = you spent money = Expense
                     return 'Expenses:UK:Unknown'
                 else:
-                    # Debt decreasing = payment or refund
+                    # Debt decreasing = payment or refund. A bill payment should
+                    # have been matched to its bank leg before reaching here.
                     return 'Income:Other'
 
             # For asset accounts, standard logic applies
