@@ -109,20 +109,50 @@ def match_wildcard(text: str, pattern: str) -> bool:
         return bool(data.match(text_upper))
 
 
+_WORD_START_CACHE: Dict[str, Any] = {}
+
+
+def _word_start_pattern(keyword: str):
+    """Compiled matcher for a keyword appearing at the START of a word."""
+    cached = _WORD_START_CACHE.get(keyword)
+    if cached is None:
+        cached = re.compile(r'(?<![A-Z0-9])' + re.escape(keyword.upper()))
+        _WORD_START_CACHE[keyword] = cached
+    return cached
+
+
 def text_contains_any(text: str, keywords: List[str]) -> bool:
-    """Check if text contains any of the keywords (case-insensitive).
+    """Check whether any keyword begins a word in text (case-insensitive).
 
-    Args:
-        text: Text to search in
-        keywords: List of keywords to search for
+    WORD START, not bare substring. A keyword may run on into the rest of the
+    word - "AMZN" still matches "AMZNMKTPLACE" - but it may not begin midway
+    through one.
 
-    Returns:
-        True if any keyword found in text
+    Plain substring matching was quietly miscategorising thousands of pounds,
+    because these keywords are short brand names and short brand names hide
+    inside ordinary words:
+
+        'ESSO'  matched  "MontESSOri"     GBP 26,004 of nursery fees as petrol
+        'BP '   matched  "VISION DIRECT GBP BRISTOL"
+        'SSE'   matched  "RuSSEll Square"
+        'EON'   matched  "LEON Cheapside"          a restaurant, as an energy bill
+        'AWS'   matched  "LAWSon Kitanoh"
+        'VUE'   matched  "BelleVUE Bicycles"
+        'SKY'   matched  "whiSKYexchange"
+        'EE '   matched  "instalment FEE ", "ad frEE for", "gumtrEE table"
+
+    Roughly 400 postings and GBP 40,000 across a dozen accounts, all invisible:
+    every one produced a confident, specific, wrong category.
+
+    The cost of the fix is compound merchant strings where the brand does not
+    start the word - "HailoCab" no longer matches 'CAB'. That is the right
+    trade: such cases are rare, and they are fixed by naming the merchant,
+    whereas substring collisions are silent and unbounded.
     """
     if not text:
         return False
     text_upper = text.upper()
-    return any(str(kw).upper() in text_upper for kw in keywords)
+    return any(_word_start_pattern(str(kw)).search(text_upper) for kw in keywords)
 
 
 def parse_amount_condition(condition: str) -> Tuple[str, Optional[Decimal], Optional[Decimal]]:
