@@ -300,3 +300,47 @@ class TestUndoneLiabilityPayments:
         undone = self._card("42.00", date(2026, 1, 6), "rev")
         undone.metadata["is_transfer_eligible"] = False
         assert self._mark([payment, undone]) == 0
+
+
+class TestRejectedAggregationKeepsBothEnvelopes:
+    """A merge that is refused must not lose one of its inputs.
+
+    Deciding two envelopes cannot be aggregated is a decision to keep them
+    apart. The code returned only group[0] while the caller marked every group
+    member processed, so group[1] left the pipeline with no lineage, no warning
+    and no posting.
+    """
+
+    def _group(self):
+        from datetime import date
+        from decimal import Decimal
+        from cassoulet.stages.envelope import Envelope
+        # Two CSV envelopes with no type overlap - GBP against USD - which
+        # can_aggregate refuses.
+        a = Envelope(source_type="csv", date=date(2025, 3, 1), narration="A",
+                     outbound_units=Decimal("100.00"), outbound_type="GBP",
+                     outbound_account="Assets:Bank:HSBC:Checking", envelope_id="a")
+        b = Envelope(source_type="csv", date=date(2025, 3, 1), narration="B",
+                     inbound_units=Decimal("100.00"), inbound_type="USD",
+                     inbound_account="Assets:Broker:HL:SIPP", envelope_id="b")
+        a.metadata["matched_with"] = ["b"]
+        b.metadata["matched_with"] = ["a"]
+        return [a, b]
+
+    def test_both_survive_a_rejected_aggregation(self):
+        from cassoulet.utils.envelope_utilities import can_aggregate
+        from cassoulet.stages.transfer_merger import TransferMerger
+        group = self._group()
+        assert not can_aggregate(group[0], group[1]), "test needs an unmergeable pair"
+
+        kept, warnings = TransferMerger()._merge_group(group)
+
+        assert {e.envelope_id for e in kept} == {"a", "b"}, "neither may be dropped"
+        assert all(e.metadata.get("aggregation_rejected") for e in kept)
+        assert any("Aggregation rejected" in w.message for w in warnings)
+
+    def test_the_rejection_clears_the_match_on_both(self):
+        from cassoulet.stages.transfer_merger import TransferMerger
+        kept, _ = TransferMerger()._merge_group(self._group())
+        for envelope in kept:
+            assert "matched_with" not in envelope.metadata

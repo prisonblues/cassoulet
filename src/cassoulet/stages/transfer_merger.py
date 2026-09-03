@@ -218,21 +218,48 @@ class TransferMerger(EnvelopeProcessor):
                     f"REJECTED AGGREGATION: Cannot aggregate {group[0].envelope_id[:30]} "
                     f"with {group[1].envelope_id[:30]} - incompatible envelopes"
                 )
-                # Don't merge - return first envelope unmodified
-                # Clear the match metadata since we're not merging
-                primary = group[0]
-                cleaned_metadata = dict(primary.metadata) if primary.metadata else {}
-                cleaned_metadata.pop('matched_with', None)
-                cleaned_metadata.pop('match_score', None)
-                cleaned_metadata.pop('match_confidence', None)
-                cleaned_metadata['aggregation_rejected'] = True
-                cleaned_metadata['rejection_reason'] = 'Failed can_aggregate check'
+                # RETURN BOTH. Deciding two envelopes cannot be merged is a
+                # decision to keep them apart, not a licence to discard one -
+                # yet this returned group[0] alone while the caller marked every
+                # member processed, so group[1] left the pipeline with no
+                # lineage, no warning and no posting. A rejected merge is
+                # precisely the case where both transactions are real and
+                # distinct, which is the argument for keeping them, and the
+                # rejection is already recorded on each.
+                #
+                # It fired zero times on the reference ledger, which is why the
+                # envelope arithmetic came out exact. It was invisible rather
+                # than harmless: for as long as the integrity check reported
+                # five permanent CRITICALs, a genuine loss here would have been
+                # lost among them.
+                kept = []
+                for envelope in group:
+                    cleaned_metadata = dict(envelope.metadata) if envelope.metadata else {}
+                    cleaned_metadata.pop('matched_with', None)
+                    cleaned_metadata.pop('match_score', None)
+                    cleaned_metadata.pop('match_confidence', None)
+                    cleaned_metadata['aggregation_rejected'] = True
+                    cleaned_metadata['rejection_reason'] = 'Failed can_aggregate check'
+                    kept.append(enhance_envelope(
+                        envelope,
+                        reason="Aggregation rejected - incompatible envelopes",
+                        metadata=cleaned_metadata
+                    ))
 
-                return [enhance_envelope(
-                    primary,
-                    reason="Aggregation rejected - incompatible envelopes",
-                    metadata=cleaned_metadata
-                )], warnings
+                warnings.append(ProcessingWarning(
+                    processor_name=self.processor_name,
+                    severity='WARNING',
+                    message=(
+                        "Aggregation rejected - both envelopes kept: "
+                        f"{group[0].envelope_id} and {group[1].envelope_id}"
+                    ),
+                    source_transaction=None,
+                    details={
+                        'envelope_ids': [e.envelope_id for e in group],
+                        'reason': 'Failed can_aggregate check',
+                    },
+                ))
+                return kept, warnings
 
         # Not reconciliation - do aggregation
         # Catch UnsafeMergeError and handle it gracefully per Steel Thread principles

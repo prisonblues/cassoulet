@@ -17,6 +17,28 @@ from cassoulet.base.exceptions import ProcessingWarning
 logger = logging.getLogger(__name__)
 
 
+def absorbed_source_ids(envelope) -> list:
+    """Every envelope id this one records as lineage, whatever key it used.
+
+    Merging and reconciliation are the same event for counting purposes - one
+    envelope stands in for another - but they were written under different keys.
+    Aggregation writes 'merged_from'; reconciliation keeps the manual entry and
+    writes 'reconciled_with' naming the CSV row it absorbed. The integrity check
+    only knew the first, so all 63 reconciliations in the reference ledger looked
+    like envelopes that had simply vanished, and TransferMerger reported a
+    CRITICAL on every run for doing exactly what it was supposed to do.
+
+    Returns ids, not a count: the caller decides whether a source still present
+    in the output was absorbed at all - see _represented_count.
+    """
+    metadata = envelope.metadata or {}
+    ids = list(metadata.get('merged_from') or ())
+    reconciled = metadata.get('reconciled_with')
+    if reconciled:
+        ids.extend([reconciled] if isinstance(reconciled, str) else reconciled)
+    return ids
+
+
 class EnvelopeProcessor(ABC):
     """
     Abstract base class for all envelope-native processors.
@@ -44,6 +66,40 @@ class EnvelopeProcessor(ABC):
             'errors_caught': 0
         }
     
+    @staticmethod
+    def _represented_count(envelopes: List[Envelope]) -> int:
+        """How many ORIGINAL envelopes this list stands for.
+
+        A merged envelope stands for the ones it consumed, so it counts as the
+        length of its 'merged_from' list rather than as one. Applied to both
+        sides of the integrity check so that a merge recorded by an earlier
+        stage cancels out and only this call's own merging can change the total.
+        """
+        present = {e.envelope_id for e in envelopes}
+        total = 0
+        for envelope in envelopes:
+            total += 1
+            # Count only the sources this envelope actually ABSORBED - ones no
+            # longer in the list. 'merged_from' is used for two different things
+            # and only one of them removes anything:
+            #
+            #   a true merge, where one envelope consumes another and only the
+            #   survivor remains; and
+            #
+            #   a matched PAIR that both survive, which is how a transfer routed
+            #   through Assets:Transfer:InTransit is represented - the bank leg
+            #   pays into the clearing account and the broker leg draws it out,
+            #   so both postings are needed and each records the other as a
+            #   source. 71 such pairs exist in the reference ledger.
+            #
+            # Counting the second kind as an absorption inflated the total by 79
+            # and produced a CRITICAL on every run. It never indicated lost
+            # money: the in-transit account nets to zero.
+            for source_id in absorbed_source_ids(envelope):
+                if source_id not in present:
+                    total += 1
+        return total
+
     def process_envelopes(
         self,
         envelopes: List[Envelope]
@@ -64,6 +120,16 @@ class EnvelopeProcessor(ABC):
         """
         # Record input count
         self.stats['input_count'] = len(envelopes)
+        # And what that input REPRESENTS, applying the same merge accounting used
+        # on the output below. Comparing represented-output against raw-input was
+        # wrong: 'merged_from' is permanent, so a merge performed once upstream
+        # was re-counted by every processor downstream of it. That produced four
+        # identical CRITICAL violations on every run of the reference ledger -
+        # 911 envelopes carrying merged_from, and a reported discrepancy of
+        # exactly 911 - from processors that had added nothing at all.
+        # Represented-in against represented-out cancels prior merges on both
+        # sides, so only merging done by THIS call can move the number.
+        represented_input = self._represented_count(envelopes)
         
         # Initialize warnings list
         all_warnings = []
@@ -94,12 +160,20 @@ class EnvelopeProcessor(ABC):
             actual_envelope_count = 0
             merge_audit = []
             
+            output_ids = {e.envelope_id for e in processed_envelopes}
             for envelope in processed_envelopes:
-                if envelope.metadata and 'merged_from' in envelope.metadata:
-                    # This is a merged envelope - count its sources
-                    source_ids = envelope.metadata['merged_from']
+                source_ids = absorbed_source_ids(envelope)
+                if source_ids:
                     source_count = len(source_ids)
-                    actual_envelope_count += source_count
+                    # Count the envelope itself, plus only those sources it
+                    # actually ABSORBED - ones no longer in the output. Sources
+                    # still present are a matched pair rather than a merge, and
+                    # they count themselves. Must match _represented_count above
+                    # exactly, or the two sides of the check disagree by the
+                    # number of surviving pairs.
+                    actual_envelope_count += 1 + sum(
+                        1 for sid in source_ids if sid not in output_ids
+                    )
                     
                     merge_audit.append({
                         'merged_id': envelope.envelope_id,
@@ -107,8 +181,18 @@ class EnvelopeProcessor(ABC):
                         'source_ids': source_ids
                     })
                     
-                    # Verify merge_count metadata consistency
-                    if envelope.metadata.get('merge_count') != source_count:
+                    # Verify merge_count metadata consistency.
+                    #
+                    # AGGREGATION ONLY. 'merge_count' is written by the
+                    # aggregation path alongside 'merged_from'; reconciliation
+                    # keeps the manual entry and writes 'reconciled_with' without
+                    # one, so applying this check to a reconciled envelope
+                    # compares a real count against None and always fails. Doing
+                    # that raised 315 ERRORs on the reference ledger - the 63
+                    # reconciliations, re-checked by each of five processors -
+                    # for envelopes that were entirely correct.
+                    merged_from = (envelope.metadata or {}).get('merged_from')
+                    if merged_from and envelope.metadata.get('merge_count') != len(merged_from):
                         all_warnings.append(ProcessingWarning(
                             processor_name=self.processor_name,
                             severity='ERROR',
@@ -117,7 +201,7 @@ class EnvelopeProcessor(ABC):
                             details={
                                 'envelope_id': envelope.envelope_id,
                                 'merge_count': envelope.metadata.get('merge_count'),
-                                'actual_sources': source_count
+                                'actual_sources': len(merged_from)
                             }
                         ))
                 else:
@@ -125,9 +209,9 @@ class EnvelopeProcessor(ABC):
                     actual_envelope_count += 1
             
             # Now check if we have the right total
-            if actual_envelope_count != self.stats['input_count']:
+            if actual_envelope_count != represented_input:
                 # This is the REAL violation - envelopes were lost or gained
-                discrepancy = actual_envelope_count - self.stats['input_count']
+                discrepancy = actual_envelope_count - represented_input
                 
                 all_warnings.append(ProcessingWarning(
                     processor_name=self.processor_name,
@@ -137,6 +221,7 @@ class EnvelopeProcessor(ABC):
                     source_transaction=None,
                     details={
                         'input_count': self.stats['input_count'],
+                        'represented_input': represented_input,
                         'output_count': self.stats['output_count'],
                         'actual_envelope_count': actual_envelope_count,
                         'merge_audit': merge_audit,
@@ -146,8 +231,8 @@ class EnvelopeProcessor(ABC):
                 
                 logger.critical(
                     f"{self.processor_name}: STEEL THREAD VIOLATION - "
-                    f"Input: {self.stats['input_count']}, "
-                    f"Output represents: {actual_envelope_count} envelopes"
+                    f"Input: {self.stats['input_count']} envelopes representing "
+                    f"{represented_input}, output represents {actual_envelope_count}"
                 )
             elif self.stats['input_count'] != self.stats['output_count']:
                 # Count is different but accounted for by merging - this is OK
