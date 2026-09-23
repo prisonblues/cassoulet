@@ -4,6 +4,7 @@ Minimal importer that only handles AJ Bell-specific quirks.
 All heavy lifting is done by MultiFileBrokerImporter.
 """
 
+from decimal import Decimal
 from typing import Dict, List
 
 from cassoulet.base.multi_file_broker_importer import MultiFileBrokerImporter
@@ -32,13 +33,36 @@ class AJBellImporter(MultiFileBrokerImporter):
     def _process_row_data(self, parsed_data: Dict[str, List[CSVRowData]]) -> Dict[str, List[CSVRowData]]:
         """Process CSVRowData to apply AJ Bell-specific fixes.
 
-        Filters out balance forward entries (opening balances for tax year).
+        Filters out balance forward entries (opening balances for tax year),
+        and clears the book cost AJ Bell prints on in-specie transfer rows.
         """
         # Filter balance forwards from cash entries
         if 'cash' in parsed_data:
             parsed_data['cash'] = self._filter_balance_forwards(parsed_data['cash'])
 
+        if 'transaction' in parsed_data:
+            self._clear_transfer_book_cost(parsed_data['transaction'])
+
         return parsed_data
+
+    def _clear_transfer_book_cost(self, txn_rows: List[CSVRowData]) -> None:
+        """Zero the Amount column on in-specie Transfer In/Out rows.
+
+        On a transfer AJ Bell fills Amount with the book cost it hands to the
+        receiving provider, not with cash. Left in place, EnvelopeBuilder reads
+        a commodity leg plus cash as a SELL (or BUY) and credits cash that never
+        moved: the Feb 2025 move to ii booked LSFUKG (841.60) and SMGB
+        (70,234.16) as sales. The figure survives in the raw-row metadata.
+        """
+        for row in txn_rows:
+            if (row.type or '').lower() not in ('transfer in', 'transfer out'):
+                continue
+            if row.amount:
+                self.logger.info(
+                    f"AJ Bell {row.type} {row.date} {row.narrative}: "
+                    f"amount {row.amount} is book cost, not cash - cleared"
+                )
+                row.amount = Decimal('0')
 
     def _filter_balance_forwards(self, cash_rows: List[CSVRowData]) -> List[CSVRowData]:
         """Filter out AJ Bell balance forward entries.
